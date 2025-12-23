@@ -4,15 +4,20 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 import streamlit.components.v1 as components
-import time
+import re
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Radio Tracker", page_icon="🩻", layout="wide")
 
 st.markdown("""
     <style>
-        .stDataEditor {max-height: 500px; overflow-y: auto;}
+        .stDataEditor {max-height: 600px; overflow-y: auto;}
         .block-container {padding-top: 1rem; padding-bottom: 1rem;}
+        /* Petit style pour les filtres */
+        div[data-testid="stExpander"] div[role="button"] p {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -38,6 +43,17 @@ def load_data(client, sheet_url):
     except Exception as e:
         st.error(f"Erreur de connexion : {e}")
         return None, None
+
+
+# --- FONCTION UTILITAIRE POUR LES TAGS ---
+def get_unique_tags(df, column_name):
+    """Récupère tous les tags individuels séparés par des virgules."""
+    # On prend toute la colonne, on la met en texte, on sépare par les virgules
+    all_text = ",".join(df[column_name].dropna().astype(str).tolist())
+    # On nettoie les espaces autour (strip) et on enlève les vides
+    tags = [t.strip() for t in all_text.split(',') if t.strip()]
+    # On retourne la liste unique triée
+    return sorted(list(set(tags)))
 
 
 # --- VARIABLES DE SESSION ---
@@ -70,10 +86,9 @@ worksheet = st.session_state.worksheet
 
 if df_base is not None:
     # --- NETTOYAGE DES DONNÉES ---
-    # Conversion des colonnes en Booléens (Vrai/Faux)
     cols_to_bool = ['read_status', 'flashcards_made', 'ignored']
 
-    # Si la colonne 'ignored' n'existe pas encore dans le CSV importé, on la crée
+    # Création colonne ignored si absente
     if 'ignored' not in df_base.columns:
         df_base['ignored'] = False
 
@@ -99,71 +114,105 @@ if df_base is not None:
         mask = df_display['url'] == st.session_state.current_url
         df_display.loc[mask, 'Voir'] = True
 
-    # --- ZONE DE FILTRES (NOUVEAU) ---
-    with st.expander("🔍 Filtres Avancés", expanded=True):
+    # --- ZONE DE FILTRES ---
+    with st.expander("🔍 Filtres & Affichage", expanded=True):
+
+        # Ligne 1 : Les modes de vue (Workflow)
+        view_mode = st.radio(
+            "Mode d'affichage :",
+            ["📥 À traiter (Actifs)", "⛔ Ignorés / Suspendus", "📂 Tout voir"],
+            horizontal=True
+        )
+
+        st.divider()  # Ligne de séparation visuelle
+
+        # Ligne 2 : Les filtres de contenu
         col_f1, col_f2, col_f3 = st.columns(3)
 
         with col_f1:
-            # Récupération des systèmes uniques pour la liste
-            all_systems = sorted([str(x) for x in df_base['system'].unique() if str(x) != ""])
-            selected_systems = st.multiselect("Filtrer par Système", all_systems)
+            # Extraction intelligente des systèmes (Sépare les virgules)
+            unique_systems = get_unique_tags(df_base, 'system')
+            selected_systems = st.multiselect("Filtrer par Système", unique_systems)
 
         with col_f2:
-            # Récupération des sections uniques
-            all_sections = sorted([str(x) for x in df_base['section'].unique() if str(x) != ""])
-            selected_sections = st.multiselect("Filtrer par Section", all_sections)
+            # Extraction intelligente des sections
+            unique_sections = get_unique_tags(df_base, 'section')
+            selected_sections = st.multiselect("Filtrer par Section", unique_sections)
 
         with col_f3:
-            # Recherche texte
             search_query = st.text_input("Recherche texte (Titre)", "", placeholder="Ex: fracture...")
 
     # --- LOGIQUE DE FILTRAGE ---
-    # On part du dataframe complet
-    filtered_df = df_display
 
-    # 1. Filtre Système
+    # 1. FILTRE PAR STATUT (Ignoré ou pas)
+    if view_mode == "📥 À traiter (Actifs)":
+        # On montre ce qui n'est PAS ignoré
+        filtered_df = df_display[df_display['ignored'] == False]
+    elif view_mode == "⛔ Ignorés / Suspendus":
+        # On montre SEULEMENT ce qui est ignoré
+        filtered_df = df_display[df_display['ignored'] == True]
+    else:
+        # Tout voir
+        filtered_df = df_display
+
+    # 2. FILTRE PAR SYSTÈME (Logique "Contient")
     if selected_systems:
-        filtered_df = filtered_df[filtered_df['system'].isin(selected_systems)]
+        # On construit une regex : "Neuro|Trauma" qui veut dire Neuro OU Trauma
+        # re.escape évite les bugs avec des caractères spéciaux
+        pattern = '|'.join([re.escape(s) for s in selected_systems])
+        filtered_df = filtered_df[
+            filtered_df['system'].astype(str).str.contains(pattern, case=False, regex=True)
+        ]
 
-    # 2. Filtre Section
+    # 3. FILTRE PAR SECTION (Logique "Contient")
     if selected_sections:
-        filtered_df = filtered_df[filtered_df['section'].isin(selected_sections)]
+        pattern_sec = '|'.join([re.escape(s) for s in selected_sections])
+        filtered_df = filtered_df[
+            filtered_df['section'].astype(str).str.contains(pattern_sec, case=False, regex=True)
+        ]
 
-    # 3. Filtre Recherche Texte
+    # 4. FILTRE RECHERCHE TEXTE
     if search_query:
         filtered_df = filtered_df[
             filtered_df['title'].str.contains(search_query, case=False, na=False)
         ]
 
-    # 4. Limite par défaut si aucun filtre (pour la performance)
-    if not selected_systems and not selected_sections and not search_query:
-        filtered_df = filtered_df.head(50)
+    # Limite si aucun filtre actif pour garder la fluidité
+    # (Seulement si on est en mode "Tout" ou "Actifs" sans recherche précise)
+    if not selected_systems and not selected_sections and not search_query and len(filtered_df) > 100:
+        filtered_df = filtered_df.head(100)
+        warning_msg = "⚠️ Affichage limité aux 100 premiers résultats. Utilise les filtres pour affiner."
+    else:
+        warning_msg = None
 
     # --- LAYOUT PRINCIPAL ---
     col1, col2 = st.columns([1.5, 1])
 
     with col1:
-        st.subheader(f"Liste ({len(filtered_df)} articles)")
-        st.caption("Auto-save activé ⚡")
+        st.subheader(f"Articles ({len(filtered_df)})")
+        if warning_msg:
+            st.caption(warning_msg)
+        else:
+            st.caption("Auto-save activé ⚡")
 
         # --- TABLEAU INTERACTIF ---
+        column_cfg = {
+            "rid": None, "content": None, "remote_last_mod_date": None, "section": None,
+            "url": None,
+            "Voir": st.column_config.CheckboxColumn("👁️", width="small"),
+            "title": st.column_config.TextColumn("Titre", disabled=True),
+            "system": st.column_config.TextColumn("Système", width="small", disabled=True),
+            "ignored": st.column_config.CheckboxColumn("⛔", width="small",
+                                                       help="Cocher pour masquer de la liste principale"),
+            "read_status": st.column_config.CheckboxColumn("Lu ?", width="small"),
+            "flashcards_made": st.column_config.CheckboxColumn("Flash ?", width="small"),
+            "notes": st.column_config.TextColumn("Notes", width="medium"),
+            "last_access": st.column_config.TextColumn("Dernier accès", disabled=True)
+        }
+
         edited_df = st.data_editor(
             filtered_df,
-            column_config={
-                "rid": None, "content": None, "remote_last_mod_date": None, "section": None,
-                "url": None,
-                "Voir": st.column_config.CheckboxColumn("👁️", width="small"),
-                "title": st.column_config.TextColumn("Titre", disabled=True),
-                "system": st.column_config.TextColumn("Système", width="small", disabled=True),
-
-                # NOUVEAU : Colonne Ignorer
-                "ignored": st.column_config.CheckboxColumn("⛔", width="small", help="Non pertinent / Suspendu"),
-
-                "read_status": st.column_config.CheckboxColumn("Lu ?", width="small"),
-                "flashcards_made": st.column_config.CheckboxColumn("Flash ?", width="small"),
-                "notes": st.column_config.TextColumn("Notes", width="medium"),
-                "last_access": st.column_config.TextColumn("Dernier accès", disabled=True)
-            },
+            column_config=column_cfg,
             hide_index=True,
             use_container_width=True,
             key="editor"
@@ -201,7 +250,6 @@ if df_base is not None:
                         for col_name, new_value in data_changes.items():
                             val_to_write = "Oui" if new_value is True else ("" if new_value is False else new_value)
 
-                            # Sécurité si la colonne n'est pas trouvée (ex: oubli dans Google Sheet)
                             if col_name in headers:
                                 col_index = headers.index(col_name) + 1
                                 worksheet.update_cell(row_number, col_index, val_to_write)
@@ -214,8 +262,7 @@ if df_base is not None:
                         need_rerun = True
 
                     except Exception as e:
-                        st.error(
-                            f"Erreur de sauvegarde (Vérifie que la colonne '{list(data_changes.keys())[0]}' existe dans ton Google Sheet) : {e}")
+                        st.error(f"Erreur de sauvegarde : {e}")
 
             if need_rerun:
                 st.rerun()
