@@ -10,7 +10,7 @@ import io
 import time
 
 # ==========================================
-# 1. CONFIGURATION & STYLE
+# 1. CONFIGURATION
 # ==========================================
 st.set_page_config(page_title="Radiopaedia Cockpit", page_icon="🩻", layout="wide")
 
@@ -21,7 +21,6 @@ st.markdown("""
         .stButton button {width: 100%;}
         h1 {font-size: 1.8rem !important;}
         h2 {font-size: 1.5rem !important;}
-        h3 {font-size: 1.2rem !important;}
         .stDataEditor {border: 1px solid #ddd; border-radius: 5px;}
     </style>
 """, unsafe_allow_html=True)
@@ -47,7 +46,7 @@ def load_data(client, sheet_url):
         df = pd.DataFrame(data)
         return df, worksheet, sh
     except Exception as e:
-        st.error(f"Erreur connexion Sheet Articles : {e}")
+        st.error(f"Erreur connexion Sheet : {e}")
         return None, None, None
 
 
@@ -60,7 +59,7 @@ def load_cards_data(sh):
             df_cards = pd.DataFrame(
                 columns=['rid', 'article_title', 'system', 'card_type', 'question', 'answer', 'tags'])
         return df_cards, worksheet_cards
-    except Exception as e:
+    except:
         return pd.DataFrame(), None
 
 
@@ -72,19 +71,21 @@ def get_unique_tags(df, column_name):
 
 
 # ==========================================
-# 3. SESSION STATE
+# 3. STATE
 # ==========================================
 if "current_rid" not in st.session_state: st.session_state.current_rid = None
 if "current_url" not in st.session_state: st.session_state.current_url = None
 if "draft_cards" not in st.session_state: st.session_state.draft_cards = []
 if "api_key" not in st.session_state: st.session_state.api_key = ""
-if "selected_model" not in st.session_state: st.session_state.selected_model = "models/gemini-1.5-flash"
+if "selected_model" not in st.session_state: st.session_state.selected_model = ""
 
 # ==========================================
-# 4. SIDEBAR (LISTE BRUTE SANS FILTRE)
+# 4. SIDEBAR : DIAGNOSTIC & MODÈLES
 # ==========================================
 with st.sidebar:
-    st.header("⚙️ Config")
+    st.header("⚙️ Config IA")
+
+    # 1. API KEY
     if "GEMINI_API_KEY" in st.secrets:
         st.session_state.api_key = st.secrets["GEMINI_API_KEY"]
         st.success("🔑 Clé API chargée")
@@ -93,49 +94,61 @@ with st.sidebar:
         if api_input: st.session_state.api_key = api_input
 
     st.divider()
-    st.write("🤖 **Modèle IA**")
 
-    model_options = []
+    # 2. RECUPERATION DYNAMIQUE STRICTE
+    real_models = []
 
     if st.session_state.api_key:
         try:
-            # Configuration FORCEE avant l'appel
             genai.configure(api_key=st.session_state.api_key)
 
-            # Appel brut à l'API Google
-            all_models_raw = list(genai.list_models())
+            # On demande TOUT
+            all_list = list(genai.list_models())
 
-            # Filtrage technique uniquement (on garde tout ce qui génère du texte)
-            for m in all_models_raw:
+            # On filtre uniquement sur la capacité
+            for m in all_list:
                 if 'generateContent' in m.supported_generation_methods:
-                    model_options.append(m.name)
+                    real_models.append(m.name)
 
-            # Tri alphabétique inverse (souvent les versions récentes sont en bas ou en haut selon la nomenclature)
-            # On trie pour avoir gemini-1.5 avant gemini-1.0
-            model_options.sort(reverse=True)
-
-            st.caption(f"✅ {len(model_options)} modèles trouvés via l'API.")
+            real_models.sort()  # Tri alphabétique pour la lisibilité
 
         except Exception as e:
             st.error(f"Erreur API : {e}")
-            st.warning("Vérifie ta clé API.")
 
-    # Si la liste est vide, on ne met PAS de fallback, on laisse vide pour que tu voies le problème
-    if not model_options:
-        st.error("Aucun modèle trouvé. Vérifie requirements.txt et ta clé.")
-        model_options = ["models/gemini-1.5-flash"]  # Juste un pour éviter le crash de l'interface
+    # 3. AFFICHAGE SELECTEUR
+    if real_models:
+        st.session_state.selected_model = st.selectbox("Choisir le modèle :", real_models)
+        st.caption(f"✅ {len(real_models)} modèles trouvés.")
+    else:
+        st.error("⚠️ Aucun modèle trouvé.")
+        st.info("Clique sur 'Diagnostic' ci-dessous pour comprendre pourquoi.")
 
-    st.session_state.selected_model = st.selectbox(
-        "Choisir le modèle :",
-        model_options,
-        index=0
-    )
+    # 4. ZONE DE DIAGNOSTIC BRUT
+    with st.expander("🔴 DIAGNOSTIC API (Clique ici)"):
+        if st.button("Lancer le test de connexion"):
+            if not st.session_state.api_key:
+                st.error("Pas de clé API.")
+            else:
+                try:
+                    genai.configure(api_key=st.session_state.api_key)
+                    raw_list = list(genai.list_models())
+                    st.write("Réponse brute de Google :")
+                    found_any = False
+                    for m in raw_list:
+                        st.text(f"- {m.name}\n  Methodes: {m.supported_generation_methods}")
+                        found_any = True
+
+                    if not found_any:
+                        st.warning(
+                            "La connexion fonctionne mais la liste est vide. Vérifie que l'API 'Generative AI' est activée dans ta console Google Cloud.")
+                except Exception as e:
+                    st.error(f"Erreur fatale : {e}")
 
     st.divider()
 
+    # Export
     if "sh_obj" in st.session_state and st.session_state.sh_obj:
-        st.subheader("📤 Export")
-        if st.button("Télécharger Anki (.txt)"):
+        if st.button("📥 Export Anki"):
             df_c, _ = load_cards_data(st.session_state.sh_obj)
             if not df_c.empty:
                 out = io.StringIO()
@@ -145,11 +158,7 @@ with st.sidebar:
                     a = str(r['answer']).replace('|', '/')
                     tag = str(r.get('tags', '')).strip() or str(r['article_title']).replace(' ', '_')
                     out.write(f"{q}|{a}|{r['card_type']}|{tag}\n")
-
-                st.download_button("💾 Sauvegarder", data=out.getvalue(), file_name=f"anki_export_{date.today()}.txt",
-                                   mime="text/plain")
-            else:
-                st.warning("Aucune carte à exporter.")
+                st.download_button("Sauvegarder .txt", data=out.getvalue(), file_name=f"anki_{date.today()}.txt")
 
 # ==========================================
 # 5. CHARGEMENT DONNÉES
@@ -157,7 +166,7 @@ with st.sidebar:
 try:
     sheet_url = st.secrets["private_sheet_url"]
 except:
-    st.error("⚠️ URL manquante dans secrets.")
+    st.error("Secrets manquants.")
     st.stop()
 
 if "client" not in st.session_state:
@@ -183,7 +192,7 @@ worksheet = st.session_state.worksheet
 sh_obj = st.session_state.sh_obj
 
 # ==========================================
-# 6. INTERFACE COCKPIT
+# 6. INTERFACE
 # ==========================================
 st.title("🩻 Radiologie Cockpit")
 
@@ -290,7 +299,7 @@ if df_base is not None:
 
         # 2. IA ARCHITECT
         with col_right:
-            st.subheader("🧠 Générateur Flashcards")
+            st.subheader("🧠 Générateur")
 
             existing_cards_context = ""
             count_existing = 0
@@ -311,86 +320,61 @@ if df_base is not None:
             mode = st.radio("Format", ["Format A: Cloze (Trous)", "Format B: Liste Différentiel"], horizontal=True)
             custom_inst = st.text_input("Instruction spécifique")
 
-            # --- BOUTON DE GENERATION SIMPLE ---
-            if st.button("✨ Générer les cartes", type="primary", key="gen_btn"):
+            if st.button("✨ Générer", type="primary"):
                 if not st.session_state.api_key:
-                    st.error("⚠️ Clé API manquante. Vérifie la barre latérale.")
+                    st.error("Manque clé API")
+                elif not st.session_state.selected_model:
+                    st.error("Aucun modèle sélectionné. Vérifie le diagnostic.")
                 else:
                     try:
                         genai.configure(api_key=st.session_state.api_key)
-
-                        safety_settings = [
-                            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-                        ]
-
                         model = genai.GenerativeModel(
-                            st.session_state.selected_model,
-                            safety_settings=safety_settings
-                        )
+                            st.session_state.selected_model)  # Pas de safety settings pour éviter conflit param
 
                         memory_block = ""
                         if existing_cards_context:
-                            memory_block = f"EXISTING CARDS (DO NOT DUPLICATE):\n{existing_cards_context}"
+                            memory_block = f"EXISTING CARDS:\n{existing_cards_context}"
 
                         sys_prompt = """
-                        System Prompt: Radiology Board Exam Anki Architect v2.2
+                        System Prompt: Radiology Board Exam Anki Architect v2.3
                         Role: Elite Medical Editor.
-                        Task: Create "Stand-Alone" Anki cards.
-
-                        CRITICAL RULE: "STAND-ALONE" TEST
+                        CRITICAL RULE: "STAND-ALONE" TEST.
                         - Never start with "It", "They".
                         - Always name the pathology explicitly in the question.
 
-                        1. CONTENT FILTERS
-                        - NO History/Trivia.
-                        - FOCUS: Critical differentiators, "Aunt Minnie", Epidemiology.
-
-                        2. FORMATTING RULES
-                        - Format A (Cloze): [Pathology] + [Verb] + {{c1::[Fact]}}.
-                        - Format B (List): Bullet points.
-
-                        3. OUTPUT FORMAT
-                        - Code Block ONLY.
+                        OUTPUT FORMAT:
                         - Pipe Separator (|).
-                        - Cols: Question/Cloze | Extra/Answer | Tag
+                        - Question/Cloze | Extra/Answer | Tag
                         """
 
                         full_prompt = f"{sys_prompt}\n{memory_block}\nArticle: {current_row['title']}\nFormat: {mode}\nInstr: {custom_inst}\nText:\n{current_row['content']}"
 
                         with st.spinner(f"Génération ({st.session_state.selected_model})..."):
                             resp = model.generate_content(full_prompt)
+                            clean = resp.text.replace("```", "").strip()
+                            new_batch = []
+                            for l in clean.split('\n'):
+                                if '|' in l:
+                                    p = l.split('|')
+                                    if len(p) >= 2:
+                                        q = p[0].strip()
+                                        if len(q) > 5 and "Question" not in q:
+                                            new_batch.append({
+                                                "rid": str(current_row['rid']),
+                                                "article_title": current_row['title'],
+                                                "system": current_row['system'],
+                                                "card_type": "Cloze" if "{{" in q else "Basic",
+                                                "question": q,
+                                                "answer": p[1].strip(),
+                                                "tags": p[2].strip() if len(p) > 2 else ""
+                                            })
 
-                            if not resp.text:
-                                st.error("L'IA a renvoyé une réponse vide.")
+                            if new_batch:
+                                st.session_state.draft_cards.extend(new_batch)
+                                st.success(f"{len(new_batch)} nouvelles cartes !")
                             else:
-                                clean = resp.text.replace("```", "").strip()
-                                new_batch = []
-                                for l in clean.split('\n'):
-                                    if '|' in l:
-                                        p = l.split('|')
-                                        if len(p) >= 2:
-                                            q = p[0].strip()
-                                            if len(q) > 5 and "Question" not in q:
-                                                new_batch.append({
-                                                    "rid": str(current_row['rid']),
-                                                    "article_title": current_row['title'],
-                                                    "system": current_row['system'],
-                                                    "card_type": "Cloze" if "{{" in q else "Basic",
-                                                    "question": q,
-                                                    "answer": p[1].strip(),
-                                                    "tags": p[2].strip() if len(p) > 2 else ""
-                                                })
-
-                                if new_batch:
-                                    st.session_state.draft_cards.extend(new_batch)
-                                    st.success(f"{len(new_batch)} nouvelles cartes !")
-                                else:
-                                    st.warning("Aucune carte valide trouvée.")
-                                    with st.expander("Voir réponse brute"):
-                                        st.code(clean)
+                                st.warning("Rien généré.")
+                                st.code(clean)
 
                     except Exception as e:
                         st.error(f"ERREUR : {e}")
@@ -445,7 +429,6 @@ if df_base is not None:
                                 st.rerun()
                             else:
                                 st.warning("Le tableau est vide.")
-
                     except Exception as e:
                         st.error(f"Erreur: {e}")
 
