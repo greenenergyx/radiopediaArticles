@@ -73,7 +73,7 @@ if "client" not in st.session_state:
 if "df" not in st.session_state:
     df_load, worksheet = load_data(st.session_state.client, sheet_url)
 
-    # Premier nettoyage des booléens au chargement
+    # Nettoyage des booléens
     if df_load is not None:
         cols_to_bool = ['read_status', 'flashcards_made', 'ignored']
         if 'ignored' not in df_load.columns: df_load['ignored'] = False
@@ -85,7 +85,6 @@ if "df" not in st.session_state:
     st.session_state.df = df_load
     st.session_state.worksheet = worksheet
 else:
-    # Récupération si déjà en mémoire
     if st.session_state.worksheet is None:
         _, st.session_state.worksheet = load_data(st.session_state.client, sheet_url)
 
@@ -94,7 +93,6 @@ worksheet = st.session_state.worksheet
 
 if df_base is not None:
     # --- PRÉPARATION DE LA VUE ---
-    # On travaille sur une copie pour l'affichage, mais on garde le lien avec df_base via l'index ou RID
 
     # 1. Nettoyage de la colonne "Voir" si elle traîne
     if "Voir" in df_base.columns:
@@ -124,41 +122,39 @@ if df_base is not None:
         col_f1, col_f2, col_f3 = st.columns(3)
         with col_f1:
             unique_systems = get_unique_tags(df_base, 'system')
-            selected_systems = st.multiselect("Filtrer par Système", unique_systems)
+            selected_systems = st.multiselect("Filtrer par Système (ET)", unique_systems)
         with col_f2:
             unique_sections = get_unique_tags(df_base, 'section')
-            selected_sections = st.multiselect("Filtrer par Section", unique_sections)
+            selected_sections = st.multiselect("Filtrer par Section (ET)", unique_sections)
         with col_f3:
             search_query = st.text_input("Recherche texte", "", placeholder="Titre...")
 
     # --- LOGIQUE DE FILTRAGE ---
 
-    # 1. FILTRE IGNORED (Correction du bug ici)
-    # On s'assure que la colonne est bien booléenne avant de filtrer
+    # 1. FILTRE IGNORED
     df_display['ignored'] = df_display['ignored'].fillna(False).astype(bool)
 
     if view_mode == "📥 À traiter (Actifs)":
-        # Montre ce qui est FALSE (non ignoré)
         filtered_df = df_display[~df_display['ignored']]
     elif view_mode == "⛔ Ignorés / Suspendus":
-        # Montre ce qui est TRUE
         filtered_df = df_display[df_display['ignored']]
     else:
         filtered_df = df_display
 
-    # 2. SYSTÈME
+    # 2. SYSTÈME (Logique RESTRICTIVE "ET")
     if selected_systems:
-        pattern = '|'.join([re.escape(s) for s in selected_systems])
-        filtered_df = filtered_df[
-            filtered_df['system'].astype(str).str.contains(pattern, case=False, regex=True)
-        ]
+        for sys_tag in selected_systems:
+            # On filtre itérativement : il faut que le système SOIT présent à chaque tour
+            filtered_df = filtered_df[
+                filtered_df['system'].astype(str).str.contains(re.escape(sys_tag), case=False, regex=True)
+            ]
 
-    # 3. SECTION
+    # 3. SECTION (Logique RESTRICTIVE "ET")
     if selected_sections:
-        pattern_sec = '|'.join([re.escape(s) for s in selected_sections])
-        filtered_df = filtered_df[
-            filtered_df['section'].astype(str).str.contains(pattern_sec, case=False, regex=True)
-        ]
+        for sec_tag in selected_sections:
+            filtered_df = filtered_df[
+                filtered_df['section'].astype(str).str.contains(re.escape(sec_tag), case=False, regex=True)
+            ]
 
     # 4. TEXTE
     if search_query:
@@ -166,7 +162,7 @@ if df_base is not None:
             filtered_df['title'].str.contains(search_query, case=False, na=False)
         ]
 
-    # Limite pour performance (optionnel)
+    # Limite pour performance (optionnel, désactivé si beaucoup de filtres)
     if not selected_systems and not selected_sections and not search_query and len(filtered_df) > 200:
         filtered_df = filtered_df.head(200)
 
@@ -176,14 +172,13 @@ if df_base is not None:
     with col1:
         st.subheader(f"Articles ({len(filtered_df)})")
 
-        # --- CONFIGURATION DES COLONNES (Ajout de Section ici) ---
+        # --- CONFIGURATION DES COLONNES ---
         column_cfg = {
             "rid": None, "content": None, "remote_last_mod_date": None,
             "url": None,
             "Voir": st.column_config.CheckboxColumn("👁️", width="small"),
             "title": st.column_config.TextColumn("Titre", disabled=True),
 
-            # Ajout des deux colonnes informatives
             "system": st.column_config.TextColumn("Système", width="small", disabled=True),
             "section": st.column_config.TextColumn("Section", width="small", disabled=True),
 
@@ -239,9 +234,7 @@ if df_base is not None:
                                 col_index = headers.index(col_name) + 1
                                 worksheet.update_cell(row_number, col_index, val_to_write)
 
-                                # 2. MISE À JOUR MÉMOIRE LOCALE (Crucial pour la réactivité)
-                                # On met à jour st.session_state.df directement !
-                                # Cela permet au filtre de fonctionner immédiatement au prochain rerun
+                                # 2. MISE À JOUR MÉMOIRE LOCALE
                                 st.session_state.df.at[original_idx, col_name] = new_value
 
                         # Update date
@@ -251,8 +244,6 @@ if df_base is not None:
 
                         st.toast("✅ Sauvegardé !", icon="💾")
 
-                        # PLUS BESOIN de vider le cache brutalement (del st.session_state.df)
-                        # car on a mis à jour la mémoire locale manuellement ci-dessus.
                         need_rerun = True
 
                     except Exception as e:
