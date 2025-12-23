@@ -81,7 +81,7 @@ if "api_key" not in st.session_state: st.session_state.api_key = ""
 if "selected_model" not in st.session_state: st.session_state.selected_model = "models/gemini-1.5-flash"
 
 # ==========================================
-# 4. SIDEBAR
+# 4. SIDEBAR (MODIFIÉE POUR LES MODÈLES)
 # ==========================================
 with st.sidebar:
     st.header("⚙️ Config")
@@ -92,8 +92,30 @@ with st.sidebar:
         api_input = st.text_input("Clé Gemini", value=st.session_state.api_key, type="password")
         if api_input: st.session_state.api_key = api_input
 
-    available_models = ["models/gemini-1.5-flash", "models/gemini-pro"]
+    # --- SÉLECTION ROBUSTE DES MODÈLES ---
+    # Liste de secours si l'API ne répond pas ou ne liste rien
+    fallback_models = [
+        "models/gemini-1.5-flash",
+        "models/gemini-1.5-pro",
+        "models/gemini-2.0-flash-exp",  # Le tout dernier (expérimental)
+        "models/gemini-1.0-pro"
+    ]
+
+    available_models = fallback_models  # Par défaut
+
+    if st.session_state.api_key:
+        try:
+            genai.configure(api_key=st.session_state.api_key)
+            # On essaie de demander à Google la liste à jour
+            all_models = genai.list_models()
+            found = [m.name for m in all_models if 'generateContent' in m.supported_generation_methods]
+            if found:
+                available_models = sorted(found, reverse=True)
+        except Exception as e:
+            st.caption("⚠️ Liste automatique indisponible, utilisation des modèles par défaut.")
+
     st.session_state.selected_model = st.selectbox("Modèle IA", available_models)
+    st.caption("Conseil : 'gemini-1.5-flash' est le plus rapide et gratuit.")
 
     st.divider()
 
@@ -256,27 +278,23 @@ if df_base is not None:
         with col_right:
             st.subheader("🧠 Générateur Flashcards")
 
-            # --- RECUPERATION DES CARTES EXISTANTES (Context Awareness) ---
-            # C'est ici que la magie opère pour éviter les doublons
+            # --- CONTEXT AWARENESS ---
             existing_cards_context = ""
             count_existing = 0
 
             if sh_obj:
                 df_c, _ = load_cards_data(sh_obj)
                 if not df_c.empty:
-                    # On filtre les cartes qui ont le même RID que l'article en cours
                     existing_for_article = df_c[df_c['rid'].astype(str) == str(current_row['rid'])]
                     count_existing = len(existing_for_article)
                     if count_existing > 0:
-                        # On formate les cartes existantes pour le prompt
                         cards_list = []
                         for _, c_row in existing_for_article.iterrows():
                             cards_list.append(f"- Q: {c_row['question']} | A: {c_row['answer']}")
                         existing_cards_context = "\n".join(cards_list)
 
             if count_existing > 0:
-                st.caption(
-                    f"ℹ️ L'IA prendra en compte les **{count_existing} cartes déjà existantes** pour être complémentaire.")
+                st.caption(f"ℹ️ Prend en compte {count_existing} cartes existantes.")
 
             with st.form("ai_form"):
                 mode = st.radio("Format", ["Format A: Cloze (Trous)", "Format B: Liste Différentiel"], horizontal=True)
@@ -291,21 +309,17 @@ if df_base is not None:
                         genai.configure(api_key=st.session_state.api_key)
                         model = genai.GenerativeModel(st.session_state.selected_model)
 
-                        # Construction du contexte "Mémoire"
                         memory_block = ""
                         if existing_cards_context:
                             memory_block = f"""
-                            CRITICAL - INCREMENTAL MODE ACTIVE:
-                            The user ALREADY HAS the following cards for this article.
-                            DO NOT generate duplicates. Find missing details, specific percentages, or complementary differentiators.
-
-                            === EXISTING CARDS (DO NOT DUPLICATE) ===
+                            CRITICAL - INCREMENTAL MODE:
+                            The user ALREADY HAS these cards. DO NOT DUPLICATE.
+                            EXISTING CARDS:
                             {existing_cards_context}
-                            =========================================
                             """
 
                         sys_prompt = """
-                        System Prompt: Radiology Board Exam Anki Architect v2.1 (Incremental)
+                        System Prompt: Radiology Board Exam Anki Architect v2.1
                         Role: Elite Medical Editor.
                         Task: Create "Stand-Alone" Anki cards.
 
@@ -329,7 +343,7 @@ if df_base is not None:
 
                         full_prompt = f"{sys_prompt}\n{memory_block}\nArticle: {current_row['title']}\nFormat: {mode}\nInstr: {custom_inst}\nText:\n{current_row['content']}"
 
-                        with st.spinner("Analyse du contexte et génération..."):
+                        with st.spinner(f"Génération avec {st.session_state.selected_model}..."):
                             resp = model.generate_content(full_prompt)
                             clean = resp.text.replace("```", "").strip()
 
@@ -351,24 +365,20 @@ if df_base is not None:
                                             })
 
                             if new_batch:
-                                # On AJOUTE aux brouillons existants au lieu d'écraser
                                 st.session_state.draft_cards.extend(new_batch)
-                                st.success(f"{len(new_batch)} nouvelles cartes générées !")
+                                st.success(f"{len(new_batch)} nouvelles cartes !")
                             else:
                                 st.warning("Rien généré.")
                     except Exception as e:
                         st.error(f"Erreur IA: {e}")
 
-            # --- PREVISUALISATION ET ÉDITION ---
+            # --- PREVISUALISATION ---
             if st.session_state.draft_cards:
                 st.divider()
                 st.subheader(f"Brouillon ({len(st.session_state.draft_cards)})")
-                st.caption("💡 Tu peux supprimer des lignes individuellement ici avant de sauvegarder.")
 
                 draft_df = pd.DataFrame(st.session_state.draft_cards)
 
-                # --- TABLEAU DYNAMIQUE (Permet la suppression) ---
-                # num_rows="dynamic" permet d'ajouter/supprimer des lignes
                 edited_draft = st.data_editor(
                     draft_df[['question', 'answer', 'tags']],
                     num_rows="dynamic",
@@ -383,12 +393,6 @@ if df_base is not None:
                         _, ws_cards = load_cards_data(sh_obj)
                         if ws_cards:
                             rows = []
-                            # Attention: edited_draft ne contient que les 3 colonnes affichées
-                            # Il faut reconstruire les métadonnées (rid, title, etc.)
-                            # On assume que toutes les cartes du brouillon concernent l'article courant ou gardent leur metadata
-
-                            # Si on a supprimé des lignes, les index changent.
-                            # Pour simplifier : on réapplique les métadonnées de l'article courant à tout le lot validé
                             for _, r in edited_draft.iterrows():
                                 rows.append([
                                     str(current_row['rid']),
@@ -403,7 +407,6 @@ if df_base is not None:
                             if rows:
                                 ws_cards.append_rows(rows)
 
-                                # Update Statut
                                 cell = worksheet.find(str(current_row['rid']))
                                 headers = worksheet.row_values(1)
                                 if 'flashcards_made' in headers:
