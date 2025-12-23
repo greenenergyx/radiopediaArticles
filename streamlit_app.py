@@ -52,7 +52,6 @@ def load_cards_data(sh):
         worksheet_cards = sh.worksheet("Cards")
         data = worksheet_cards.get_all_records()
         df_cards = pd.DataFrame(data)
-        # Colonnes attendues si vide
         if df_cards.empty:
             df_cards = pd.DataFrame(columns=['rid', 'article_title', 'system', 'card_type', 'question', 'answer'])
         return df_cards, worksheet_cards
@@ -80,11 +79,17 @@ if "api_key" not in st.session_state: st.session_state.api_key = ""
 with st.sidebar:
     st.title("⚙️ Configuration")
 
-    # Clé API Gemini
-    api_input = st.text_input("Clé API Google Gemini", value=st.session_state.api_key, type="password")
-    if api_input: st.session_state.api_key = api_input
+    # --- GESTION AUTOMATIQUE DE LA CLÉ (NOUVEAU) ---
+    # 1. On vérifie si la clé est dans les secrets
+    if "GEMINI_API_KEY" in st.secrets:
+        st.session_state.api_key = st.secrets["GEMINI_API_KEY"]
+        st.success("🔑 Clé API chargée depuis les secrets")
 
-    st.caption("Si tu n'as pas de clé, va sur Google AI Studio.")
+    # 2. Si pas de secret, on demande manuellement (Fallback)
+    else:
+        api_input = st.text_input("Clé API Google Gemini", value=st.session_state.api_key, type="password")
+        if api_input: st.session_state.api_key = api_input
+        st.caption("Astuce : Ajoute GEMINI_API_KEY dans les secrets Streamlit pour ne plus la saisir.")
 
     st.divider()
     st.write("🤖 **Paramètres IA**")
@@ -130,7 +135,7 @@ sh_obj = st.session_state.sh_obj
 tab1, tab2, tab3 = st.tabs(["📊 Tracker de Lecture", "🏭 Usine à Flashcards (IA)", "🗃️ Base de Cartes & Export"])
 
 # ==========================================
-# TAB 1 : LE TRACKER (Ton ancienne app)
+# TAB 1 : LE TRACKER
 # ==========================================
 with tab1:
     if df_base is not None:
@@ -245,18 +250,16 @@ with tab1:
                 st.info("Sélectionne avec 👁️")
 
 # ==========================================
-# TAB 2 : USINE À FLASHCARDS (Ton code IA adapté)
+# TAB 2 : USINE À FLASHCARDS (IA)
 # ==========================================
 with tab2:
     st.header("🏭 Générateur de Cartes (Gemini)")
 
     if not st.session_state.api_key:
-        st.warning("⚠️ Entre ta clé API Gemini dans la barre latérale gauche pour commencer.")
+        st.warning("⚠️ Clé API introuvable. Ajoute 'GEMINI_API_KEY' dans les secrets ou entre-la manuellement.")
     else:
-        # Sélection de l'article depuis la base existante (df_base)
         st.write("1️⃣ **Choisis un article source**")
 
-        # On utilise les filtres simples pour aider à trouver
         c_sel1, c_sel2 = st.columns([1, 2])
         f_sys_ia = c_sel1.selectbox("Filtrer liste par Système", ["Tout"] + u_sys)
 
@@ -267,7 +270,6 @@ with tab2:
         candidates['label'] = candidates['title'] + " (ID: " + candidates['rid'].astype(str) + ")"
         sel_article_label = c_sel2.selectbox("Sélectionne l'article", candidates['label'].unique())
 
-        # Récupération du contenu
         row_art = candidates[candidates['label'] == sel_article_label].iloc[0]
 
         st.divider()
@@ -285,7 +287,7 @@ with tab2:
             if st.button("✨ Générer les cartes", type="primary", use_container_width=True):
                 try:
                     genai.configure(api_key=st.session_state.api_key)
-                    model = genai.GenerativeModel("models/gemini-1.5-flash")  # Modèle rapide et efficace
+                    model = genai.GenerativeModel("models/gemini-1.5-flash")
 
                     prompt = f"""
                     Role: Expert Medical Tutor in Radiology.
@@ -318,7 +320,6 @@ with tab2:
                 except Exception as e:
                     st.error(f"Erreur IA : {e}")
 
-        # Zone des brouillons
         if st.session_state.draft_cards:
             st.divider()
             st.subheader(f"📝 Brouillons en attente ({len(st.session_state.draft_cards)})")
@@ -330,14 +331,12 @@ with tab2:
             c_save, c_del = st.columns(2)
             if c_save.button("☁️ Valider et Envoyer dans Google Sheets", type="primary"):
                 try:
-                    # Chargement ou création de l'onglet Cards
                     _, ws_cards = load_cards_data(sh_obj)
                     if ws_cards:
-                        # Conversion en liste de listes pour gspread
                         rows_to_add = draft_df[
                             ['rid', 'article_title', 'system', 'card_type', 'question', 'answer']].values.tolist()
                         ws_cards.append_rows(rows_to_add)
-                        st.session_state.draft_cards = []  # Vide le brouillon
+                        st.session_state.draft_cards = []
                         st.success("Cartes sauvegardées dans l'onglet 'Cards' !")
                         time.sleep(1)
                         st.rerun()
@@ -364,7 +363,6 @@ with tab3:
         st.write(f"Total : **{len(df_cards)} cartes**")
         st.dataframe(df_cards, use_container_width=True)
 
-        # Export Anki
         out = io.StringIO()
         out.write("#separator:Semicolon\n#html:true\n#tags column:4\n")
         for _, r in df_cards.iterrows():
@@ -376,4 +374,4 @@ with tab3:
         st.download_button("⬇️ Télécharger pour Anki (.txt)", data=out.getvalue(),
                            file_name=f"anki_export_{datetime.date.today()}.txt")
     else:
-        st.info("Aucune carte trouvée. Va dans l'onglet 'Usine à Flashcards' pour en créer !")
+        st.info("Aucune carte trouvée.")
