@@ -81,7 +81,7 @@ if "api_key" not in st.session_state: st.session_state.api_key = ""
 if "selected_model" not in st.session_state: st.session_state.selected_model = "models/gemini-1.5-flash"
 
 # ==========================================
-# 4. SIDEBAR (MODIFIÉE POUR LES MODÈLES)
+# 4. SIDEBAR
 # ==========================================
 with st.sidebar:
     st.header("⚙️ Config")
@@ -92,30 +92,14 @@ with st.sidebar:
         api_input = st.text_input("Clé Gemini", value=st.session_state.api_key, type="password")
         if api_input: st.session_state.api_key = api_input
 
-    # --- SÉLECTION ROBUSTE DES MODÈLES ---
-    # Liste de secours si l'API ne répond pas ou ne liste rien
-    fallback_models = [
-        "models/gemini-1.5-flash",
-        "models/gemini-1.5-pro",
-        "models/gemini-2.0-flash-exp",  # Le tout dernier (expérimental)
-        "models/gemini-1.0-pro"
-    ]
+    # Liste de modèles robuste (si l'API échoue à lister)
+    fallback_models = ["models/gemini-1.5-flash", "models/gemini-1.5-pro", "models/gemini-pro"]
 
-    available_models = fallback_models  # Par défaut
-
-    if st.session_state.api_key:
-        try:
-            genai.configure(api_key=st.session_state.api_key)
-            # On essaie de demander à Google la liste à jour
-            all_models = genai.list_models()
-            found = [m.name for m in all_models if 'generateContent' in m.supported_generation_methods]
-            if found:
-                available_models = sorted(found, reverse=True)
-        except Exception as e:
-            st.caption("⚠️ Liste automatique indisponible, utilisation des modèles par défaut.")
-
-    st.session_state.selected_model = st.selectbox("Modèle IA", available_models)
-    st.caption("Conseil : 'gemini-1.5-flash' est le plus rapide et gratuit.")
+    st.session_state.selected_model = st.selectbox(
+        "Modèle IA",
+        fallback_models,
+        index=0
+    )
 
     st.divider()
 
@@ -303,23 +287,31 @@ if df_base is not None:
 
             if submitted_gen:
                 if not st.session_state.api_key:
-                    st.error("Manque clé API Gemini !")
+                    st.error("Manque clé API Gemini ! Vérifie la barre latérale.")
                 else:
                     try:
+                        # CONFIGURATION EXPLICITE À CHAQUE APPEL
                         genai.configure(api_key=st.session_state.api_key)
-                        model = genai.GenerativeModel(st.session_state.selected_model)
+
+                        # Paramètres de sécurité pour éviter les blocages "Médical = Gore"
+                        safety_settings = [
+                            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                        ]
+
+                        model = genai.GenerativeModel(
+                            st.session_state.selected_model,
+                            safety_settings=safety_settings
+                        )
 
                         memory_block = ""
                         if existing_cards_context:
-                            memory_block = f"""
-                            CRITICAL - INCREMENTAL MODE:
-                            The user ALREADY HAS these cards. DO NOT DUPLICATE.
-                            EXISTING CARDS:
-                            {existing_cards_context}
-                            """
+                            memory_block = f"EXISTING CARDS (DO NOT DUPLICATE):\n{existing_cards_context}"
 
                         sys_prompt = """
-                        System Prompt: Radiology Board Exam Anki Architect v2.1
+                        System Prompt: Radiology Board Exam Anki Architect v2.2
                         Role: Elite Medical Editor.
                         Task: Create "Stand-Alone" Anki cards.
 
@@ -343,34 +335,41 @@ if df_base is not None:
 
                         full_prompt = f"{sys_prompt}\n{memory_block}\nArticle: {current_row['title']}\nFormat: {mode}\nInstr: {custom_inst}\nText:\n{current_row['content']}"
 
-                        with st.spinner(f"Génération avec {st.session_state.selected_model}..."):
+                        with st.spinner(f"Génération ({st.session_state.selected_model})..."):
                             resp = model.generate_content(full_prompt)
-                            clean = resp.text.replace("```", "").strip()
 
-                            new_batch = []
-                            for l in clean.split('\n'):
-                                if '|' in l:
-                                    p = l.split('|')
-                                    if len(p) >= 2:
-                                        q = p[0].strip()
-                                        if len(q) > 5 and "Question" not in q:
-                                            new_batch.append({
-                                                "rid": str(current_row['rid']),
-                                                "article_title": current_row['title'],
-                                                "system": current_row['system'],
-                                                "card_type": "Cloze" if "{{" in q else "Basic",
-                                                "question": q,
-                                                "answer": p[1].strip(),
-                                                "tags": p[2].strip() if len(p) > 2 else ""
-                                            })
-
-                            if new_batch:
-                                st.session_state.draft_cards.extend(new_batch)
-                                st.success(f"{len(new_batch)} nouvelles cartes !")
+                            if not resp.text:
+                                st.error("L'IA a renvoyé une réponse vide.")
                             else:
-                                st.warning("Rien généré.")
+                                clean = resp.text.replace("```", "").strip()
+                                new_batch = []
+                                for l in clean.split('\n'):
+                                    if '|' in l:
+                                        p = l.split('|')
+                                        if len(p) >= 2:
+                                            q = p[0].strip()
+                                            if len(q) > 5 and "Question" not in q:
+                                                new_batch.append({
+                                                    "rid": str(current_row['rid']),
+                                                    "article_title": current_row['title'],
+                                                    "system": current_row['system'],
+                                                    "card_type": "Cloze" if "{{" in q else "Basic",
+                                                    "question": q,
+                                                    "answer": p[1].strip(),
+                                                    "tags": p[2].strip() if len(p) > 2 else ""
+                                                })
+
+                                if new_batch:
+                                    st.session_state.draft_cards.extend(new_batch)
+                                    st.success(f"{len(new_batch)} nouvelles cartes !")
+                                else:
+                                    st.warning("Aucune carte valide trouvée dans la réponse.")
+                                    with st.expander("Voir la réponse brute pour débogage"):
+                                        st.write(clean)
+
                     except Exception as e:
-                        st.error(f"Erreur IA: {e}")
+                        st.error(f"ERREUR CRITIQUE IA : {e}")
+                        st.caption("Essaie de changer de modèle dans la barre latérale (ex: gemini-1.5-pro).")
 
             # --- PREVISUALISATION ---
             if st.session_state.draft_cards:
