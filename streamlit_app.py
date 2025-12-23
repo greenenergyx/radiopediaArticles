@@ -10,7 +10,7 @@ import io
 import time
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Radio Tracker & AI", page_icon="🩻", layout="wide")
+st.set_page_config(page_title="Radiopaedia Architect", page_icon="🩻", layout="wide")
 
 st.markdown("""
     <style>
@@ -53,7 +53,9 @@ def load_cards_data(sh):
         data = worksheet_cards.get_all_records()
         df_cards = pd.DataFrame(data)
         if df_cards.empty:
-            df_cards = pd.DataFrame(columns=['rid', 'article_title', 'system', 'card_type', 'question', 'answer'])
+            # On ajoute 'tags' à la structure
+            df_cards = pd.DataFrame(
+                columns=['rid', 'article_title', 'system', 'card_type', 'question', 'answer', 'tags'])
         return df_cards, worksheet_cards
     except gspread.exceptions.WorksheetNotFound:
         st.error("L'onglet 'Cards' n'existe pas dans le Google Sheet. Crée-le svp !")
@@ -90,30 +92,27 @@ with st.sidebar:
 
     st.divider()
 
-    # 2. Sélecteur de Modèle Dynamique (CORRECTION DU BUG)
+    # 2. Sélecteur de Modèle
     st.write("🤖 **Modèle IA**")
-    available_models = ["models/gemini-pro"]  # Valeur par défaut de secours
+    available_models = ["models/gemini-1.5-flash", "models/gemini-pro"]
 
     if st.session_state.api_key:
         try:
             genai.configure(api_key=st.session_state.api_key)
-            # On liste les modèles disponibles pour cette clé
             all_models = genai.list_models()
             found_models = [m.name for m in all_models if 'generateContent' in m.supported_generation_methods]
             if found_models:
                 available_models = sorted(found_models, reverse=True)
         except Exception:
-            st.caption("⚠️ Impossible de lister les modèles (Clé invalide ?)")
+            pass
 
-    # Le menu déroulant pour choisir
     st.session_state.selected_model = st.selectbox("Choisir le modèle :", available_models, index=0)
 
     st.divider()
-    default_rules = "Create concise Anki cards. Focus on radiology signs, pathology, and differential diagnosis."
-    global_rules = st.text_area("Instructions Globales", value=default_rules, height=100)
+    st.info("ℹ️ Le Prompt 'Crack the Core' est actif par défaut.")
 
 # --- DÉBUT APP ---
-st.title("🩻 Radio Études & AI Architect")
+st.title("🩻 Radio Architect & Tracker")
 
 try:
     sheet_url = st.secrets["private_sheet_url"]
@@ -147,7 +146,7 @@ worksheet = st.session_state.worksheet
 sh_obj = st.session_state.sh_obj
 
 # --- STRUCTURE DES ONGLETS ---
-tab1, tab2, tab3 = st.tabs(["📊 Tracker de Lecture", "🏭 Usine à Flashcards (IA)", "🗃️ Base de Cartes & Export"])
+tab1, tab2, tab3 = st.tabs(["📊 Tracker", "🏭 Usine à Flashcards (Architect)", "🗃️ Base & Export"])
 
 # ==========================================
 # TAB 1 : LE TRACKER
@@ -263,7 +262,7 @@ with tab1:
 # TAB 2 : USINE À FLASHCARDS (IA)
 # ==========================================
 with tab2:
-    st.header("🏭 Générateur de Cartes")
+    st.header("🏭 Générateur de Cartes (Board Exam Architect)")
 
     if not st.session_state.api_key:
         st.warning("⚠️ Clé API introuvable.")
@@ -289,44 +288,99 @@ with tab2:
             st.text_area("Texte source", row_art['content'], height=500, disabled=True)
 
         with col_gen:
-            st.subheader("🤖 IA")
-            st.info(f"Modèle utilisé : **{st.session_state.selected_model}**")
-            mode = st.radio("Type", ["Basic (Q&A)", "Cloze (Texte à trous)"], horizontal=True)
-            custom_inst = st.text_input("Instruction spécifique")
+            st.subheader("🤖 IA Architect")
+            st.info(f"Modèle : **{st.session_state.selected_model}**")
+            mode = st.radio("Format cible", ["Format A: Board Fact Cloze", "Format B: Differential List"],
+                            horizontal=True)
+            custom_inst = st.text_input("Instruction additionnelle (Optionnel)")
 
-            if st.button("✨ Générer les cartes", type="primary", use_container_width=True):
+            if st.button("✨ Créer les Flashcards", type="primary", use_container_width=True):
                 try:
-                    # CONFIGURATION DU MODÈLE CHOISI DANS LA SIDEBAR
                     genai.configure(api_key=st.session_state.api_key)
                     model = genai.GenerativeModel(st.session_state.selected_model)
 
-                    prompt = f"""
-                    Role: Expert Medical Tutor in Radiology.
-                    Global Rules: {global_rules}
-                    Specific Instructions: {custom_inst}
-                    Format: {mode}. If Cloze, use {{c1::hidden}}.
-                    Output: CSV format, semicolon (;) separator. NO headers.
-                    Text to process:
+                    # --- TON SYSTEM PROMPT INTÉGRÉ ICI ---
+                    system_prompt = """
+                    System Prompt: Radiology Board Exam Anki Architect
+                    Role: You are the Lead Editor for the "Crack the Core" Radiology Board Review Series. Your task is to convert raw medical text into high-performance Anki flashcards that mimic the style and difficulty of the ABR Core Exam.
+
+                    Objective: Maximize retention of "Aunt Minnie" diagnoses, critical differentiators, and board-relevant epidemiology while minimizing card count. Quality over quantity.
+
+                    1. The "Board Filter" (Selection Criteria)
+                    Do NOT create cards for generic anatomy or basic physiology unless it is the direct basis for a pathology.
+                    Only create cards for:
+                    - Buzzwords: Specific phrases used in board questions.
+                    - Critical Differentiators: The single feature that separates two look-alike pathologies.
+                    - Board Epidemiology: "Most common", age peaks, gender biases.
+                    - Associations: Syndromes, mutations, "Next Best Step".
+                    - Mechanism: Brief pathophysiology if it explains imaging appearance.
+
+                    2. Card Construction Rules
+                    Format A: The "Board Fact" Cloze (Standard)
+                    - Syntax: Use {{c1::hidden text}} for the key fact.
+                    - Rule: One fact per card. Do not cloze multiple unrelated facts.
+                    - Focus: Cloze the finding or the diagnosis, not the lead-in words.
+                    - Extra Field: Place detailed explanation/mechanism/mnemonic in the "Extra" field.
+
+                    Format B: The "Differential" List (Basic)
+                    - Use this for lists of 3+ items or specific criteria triads.
+                    - Question: What is the [Name of Sign/Triad/List]?
+                    - Answer: Use concise bullet points.
+
+                    3. Formatting
+                    - Images: If text describes visual sign, append [IMAGE: Description] to the card.
+                    - Mnemonics: Always highlight mnemonics in bold.
+                    - Tags: Suggest a hierarchical tag (e.g., #Neuro::TemporalBone).
+
+                    4. Output Structure
+                    - Output ONLY the final result in a Code Block.
+                    - Use a PIPE (|) separator.
+                    - Structure: Question/Cloze Text | Extra/Answer | Tag
+                    - Do NOT include headers.
+                    """
+
+                    full_prompt = f"""
+                    {system_prompt}
+
+                    CURRENT TASK:
+                    - Format requested: {mode}
+                    - Additional User Instructions: {custom_inst}
+
+                    TEXT TO PROCESS:
                     {row_art['content']}
                     """
 
-                    with st.spinner(f"Génération avec {st.session_state.selected_model}..."):
-                        response = model.generate_content(prompt)
-                        clean = response.text.replace("```csv", "").replace("```", "").strip()
+                    with st.spinner(f"L'Architecte analyse avec {st.session_state.selected_model}..."):
+                        response = model.generate_content(full_prompt)
+                        clean = response.text.replace("```", "").strip()  # Nettoyage basique
+
                         new_batch = []
                         for l in clean.split('\n'):
-                            if ';' in l:
-                                parts = l.split(';', 1)
-                                new_batch.append({
-                                    "rid": str(row_art['rid']),
-                                    "article_title": row_art['title'],
-                                    "system": row_art['system'],
-                                    "card_type": mode,
-                                    "question": parts[0].strip(),
-                                    "answer": parts[1].strip()
-                                })
-                        st.session_state.draft_cards.extend(new_batch)
-                        st.success(f"{len(new_batch)} cartes générées !")
+                            # On cherche le séparateur PIPE |
+                            if '|' in l:
+                                parts = l.split('|')
+                                if len(parts) >= 2:
+                                    q = parts[0].strip()
+                                    a = parts[1].strip()
+                                    t = parts[2].strip() if len(parts) > 2 else ""
+
+                                    new_batch.append({
+                                        "rid": str(row_art['rid']),
+                                        "article_title": row_art['title'],
+                                        "system": row_art['system'],
+                                        "card_type": "Cloze" if "{{" in q else "Basic",
+                                        "question": q,
+                                        "answer": a,
+                                        "tags": t
+                                    })
+
+                        if new_batch:
+                            st.session_state.draft_cards.extend(new_batch)
+                            st.success(f"{len(new_batch)} cartes de haute qualité générées !")
+                        else:
+                            st.warning(
+                                "L'IA n'a pas généré de cartes valides. Essaie un autre modèle ou vérifie le texte.")
+                            st.write("Réponse brute de l'IA pour débogage :", clean)
 
                 except Exception as e:
                     st.error(f"Erreur IA : {e}")
@@ -334,19 +388,29 @@ with tab2:
         if st.session_state.draft_cards:
             st.divider()
             st.subheader(f"📝 Brouillons ({len(st.session_state.draft_cards)})")
+
             draft_df = pd.DataFrame(st.session_state.draft_cards)
-            st.dataframe(draft_df[['question', 'answer']], use_container_width=True)
+            # Affichage personnalisé avec Tags
+            st.dataframe(draft_df[['question', 'answer', 'tags']], use_container_width=True)
 
             c_save, c_del = st.columns(2)
             if c_save.button("☁️ Valider et Envoyer (Sheets)", type="primary"):
                 try:
                     _, ws_cards = load_cards_data(sh_obj)
                     if ws_cards:
-                        rows_to_add = draft_df[
-                            ['rid', 'article_title', 'system', 'card_type', 'question', 'answer']].values.tolist()
+                        # On prépare les colonnes pour gspread (ajout de tags)
+                        # Ordre: rid, article_title, system, card_type, question, answer, tags
+                        rows_to_add = []
+                        for _, row in draft_df.iterrows():
+                            rows_to_add.append([
+                                row['rid'], row['article_title'], row['system'],
+                                row['card_type'], row['question'], row['answer'],
+                                row.get('tags', '')  # Sécurité si tags manquant
+                            ])
+
                         ws_cards.append_rows(rows_to_add)
                         st.session_state.draft_cards = []
-                        st.success("Sauvegardé dans 'Cards' !")
+                        st.success("Sauvegardé dans 'Cards' avec succès !")
                         time.sleep(1)
                         st.rerun()
                 except Exception as e:
@@ -372,13 +436,24 @@ with tab3:
         st.dataframe(df_cards, use_container_width=True)
 
         out = io.StringIO()
-        out.write("#separator:Semicolon\n#html:true\n#tags column:4\n")
-        for _, r in df_cards.iterrows():
-            q = str(r['question']).replace(';', ',')
-            a = str(r['answer']).replace(';', ',')
-            tag = str(r['article_title']).replace(' ', '_').replace(';', '')
-            out.write(f"{r['card_type']};{q};{a};{tag}\n")
+        # En-tête compatible Anki
+        out.write("#separator:Pipe\n#html:true\n#tags column:4\n")
 
-        st.download_button("⬇️ Télécharger Anki", data=out.getvalue(), file_name=f"anki_{datetime.date.today()}.txt")
+        for _, r in df_cards.iterrows():
+            # Nettoyage des pipes dans le texte pour ne pas casser l'export
+            q = str(r['question']).replace('|', '/')
+            a = str(r['answer']).replace('|', '/')
+
+            # Gestion des tags : on utilise ceux générés par l'IA s'ils existent
+            if 'tags' in r and str(r['tags']).strip() != "":
+                tag = str(r['tags']).strip()
+            else:
+                tag = str(r['article_title']).replace(' ', '_')
+
+            # Export séparé par des Pipes |
+            out.write(f"{q}|{a}|{r['card_type']}|{tag}\n")
+
+        st.download_button("⬇️ Télécharger Export Anki (.txt)", data=out.getvalue(),
+                           file_name=f"anki_board_prep_{datetime.date.today()}.txt")
     else:
         st.info("Aucune carte trouvée.")
