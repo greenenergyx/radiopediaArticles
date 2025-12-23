@@ -8,6 +8,7 @@ import google.generativeai as genai
 import io
 import re
 import time
+import os
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Radiopaedia Cockpit", page_icon="🩻", layout="wide")
@@ -16,10 +17,7 @@ st.set_page_config(page_title="Radiopaedia Cockpit", page_icon="🩻", layout="w
 st.markdown("""
     <style>
         .block-container {padding-top: 1rem; padding-bottom: 3rem;}
-        div[data-testid="stExpander"] div[role="button"] p {font-weight: 600;}
         .stButton button {width: 100%;}
-        h1 {font-size: 1.8rem !important;}
-        .stDataEditor {border: 1px solid #ddd;}
     </style>
 """, unsafe_allow_html=True)
 
@@ -60,8 +58,7 @@ def load_cards_data(sh):
             df_cards = pd.DataFrame(columns=columns)
         else:
             for col in columns:
-                if col not in df_cards.columns:
-                    df_cards[col] = ""
+                if col not in df_cards.columns: df_cards[col] = ""
         return df_cards, worksheet_cards
     except:
         return pd.DataFrame(), None
@@ -77,53 +74,48 @@ def get_unique_tags(df, column_name):
 # --- STATE ---
 if "current_rid" not in st.session_state: st.session_state.current_rid = None
 if "draft_cards" not in st.session_state: st.session_state.draft_cards = []
-if "api_key" not in st.session_state: st.session_state.api_key = ""
-if "selected_model" not in st.session_state: st.session_state.selected_model = ""
 
-# --- SIDEBAR (CODE MODIFIÉ "INCASSABLE") ---
+# --- SIDEBAR & AI SETUP ---
 with st.sidebar:
     st.header("⚙️ AI Config")
 
-    # 1. API Key
-    if "GEMINI_API_KEY" in st.secrets:
-        st.session_state.api_key = st.secrets["GEMINI_API_KEY"]
-    else:
-        # Fallback pour test manuel si pas dans les secrets
-        st.session_state.api_key = st.text_input("Gemini API Key", value="", type="password")
+    # Récupération Clé API
+    api_key = st.secrets.get("GEMINI_API_KEY", "")
+    if not api_key:
+        api_key = st.text_input("Gemini API Key", type="password")
 
-    # 2. Model Selection (HYBRIDE : Dynamique + Fallback)
-    model_options = []
+    # 1. Configuration FORCEE avec transport REST (Fix firewall issues)
+    if api_key:
+        genai.configure(api_key=api_key, transport="rest")
 
-    # Tentative de listing officiel
-    if st.session_state.api_key:
+    # 2. Hardcoded Model Selection (Bypassing ListModels if it fails)
+    # On propose les 3 modèles clés. Pas de requête dynamique risquée.
+    model_map = {
+        "Gemini 1.5 Flash (Fastest)": "gemini-1.5-flash",
+        "Gemini 1.5 Pro (Best)": "gemini-1.5-pro",
+        "Gemini 1.0 Pro (Legacy)": "gemini-pro"
+    }
+
+    selected_name = st.selectbox("Model", list(model_map.keys()), index=0)
+    selected_model_id = model_map[selected_name]
+
+    # 3. Diagnostic Visuel
+    st.divider()
+    st.caption(f"📚 Lib Version: {genai.__version__}")
+    st.caption(f"🤖 Target: {selected_model_id}")
+
+    if st.button("🔌 Test Connection"):
         try:
-            genai.configure(api_key=st.session_state.api_key)
-            all_models = genai.list_models()
-            for m in all_models:
-                if 'generateContent' in m.supported_generation_methods:
-                    model_options.append(m.name)
-            model_options.sort(reverse=True)
-        except Exception:
-            # Si l'API échoue à lister (erreur 403/404), on ne plante pas.
-            pass
-
-    # C'EST ICI QUE JE RÈGLE TON PROBLÈME :
-    # Si la liste est vide (échec API), on force les noms connus manuellement.
-    if not model_options:
-        model_options = [
-            "models/gemini-1.5-flash",
-            "models/gemini-1.5-pro",
-            "models/gemini-1.0-pro",
-            "gemini-pro"
-        ]
-        st.caption("⚠️ Mode manuel (API listing failed)")
-
-    st.session_state.selected_model = st.selectbox("Select Model", model_options)
+            model = genai.GenerativeModel(selected_model_id)
+            response = model.generate_content("Hello")
+            st.success("OK! Connected.")
+        except Exception as e:
+            st.error(f"Fail: {e}")
 
     # Export Anki
     if "sh_obj" in st.session_state and st.session_state.sh_obj:
         st.divider()
-        if st.button("📥 Export Anki (.txt)"):
+        if st.button("📥 Export Anki"):
             df_c, _ = load_cards_data(st.session_state.sh_obj)
             if not df_c.empty:
                 out = io.StringIO()
@@ -139,7 +131,6 @@ with st.sidebar:
 try:
     sheet_url = st.secrets["private_sheet_url"]
 except:
-    st.warning("Missing 'private_sheet_url' in st.secrets")
     st.stop()
 
 if "client" not in st.session_state: st.session_state.client = get_google_sheet_client()
@@ -283,25 +274,25 @@ if df_base is not None:
                 instr = st.text_input("Instructions", placeholder="Ex: Focus on MRI findings...")
 
                 if st.button("✨ Generate Cards", type="primary"):
-                    if not st.session_state.api_key:
-                        st.error("No API Key found.")
+                    if not api_key:
+                        st.error("Missing API Key (Sidebar)")
                     else:
                         try:
-                            with st.spinner(f"Generating with {st.session_state.selected_model}..."):
-                                genai.configure(api_key=st.session_state.api_key)
-                                model = genai.GenerativeModel(st.session_state.selected_model)
+                            with st.spinner(f"Thinking ({selected_model_id})..."):
+                                # Ensure config is set right before call
+                                genai.configure(api_key=api_key, transport="rest")
+                                model = genai.GenerativeModel(selected_model_id)
 
-                                # Prompt in English
+                                # Prompt
                                 mem = f"DO NOT generate these questions again (already done):\n{existing_ctx}" if existing_ctx else ""
-                                sys = """Role: Elite Medical Editor for Radiopaedia. 
-                                Goal: Create Anki flashcards.
+                                sys = """Role: Elite Medical Editor. Goal: Create Anki flashcards.
                                 Rules:
-                                1. STRICTLY Stand-Alone cards: Never use 'It', 'They', 'The lesion'. Always name the pathology/sign in the question.
+                                1. STRICTLY Stand-Alone cards: Never use 'It', 'They'. Always name the pathology/sign.
                                 2. Format: Question|Answer|Tag
                                 3. Separator is purely pipe (|). No Markdown tables.
                                 4. Language: English."""
 
-                                prompt = f"{sys}\n{mem}\n\nTask:\nArticle Title: {current_row['title']}\nFormat Mode: {mode}\nUser Instruction: {instr}\n\nSource Content:\n{current_row['content']}"
+                                prompt = f"{sys}\n{mem}\n\nTask:\nArticle Title: {current_row['title']}\nFormat: {mode}\nInstr: {instr}\n\nContent:\n{current_row['content']}"
 
                                 resp = model.generate_content(prompt)
 
@@ -326,10 +317,10 @@ if df_base is not None:
                                     st.success(f"{len(batch)} cards generated!")
                                     st.rerun()
                                 else:
-                                    st.warning("AI generated no formatted output. Try again.")
+                                    st.warning("No formatted output. Try again.")
 
                         except Exception as e:
-                            st.error(f"Gemini API Error: {e}")
+                            st.error(f"GenAI Error: {e}")
 
                 if st.session_state.draft_cards:
                     st.divider()
@@ -357,7 +348,6 @@ if df_base is not None:
 
                                     if rows_to_add:
                                         ws_cards.append_rows(rows_to_add)
-
                                         try:
                                             cell = worksheet.find(str(current_row['rid']))
                                             headers = worksheet.row_values(1)
@@ -371,7 +361,7 @@ if df_base is not None:
                                             pass
 
                                         st.session_state.draft_cards = []
-                                        st.toast("Cards Saved!", icon="🎉")
+                                        st.toast("Saved!", icon="🎉")
                                         time.sleep(1)
                                         st.rerun()
                             except Exception as e:
