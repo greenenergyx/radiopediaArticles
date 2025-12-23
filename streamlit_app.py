@@ -81,7 +81,7 @@ if "api_key" not in st.session_state: st.session_state.api_key = ""
 if "selected_model" not in st.session_state: st.session_state.selected_model = "models/gemini-1.5-flash"
 
 # ==========================================
-# 4. SIDEBAR
+# 4. SIDEBAR (LISTE COMPLÈTE DES MODÈLES)
 # ==========================================
 with st.sidebar:
     st.header("⚙️ Config")
@@ -92,14 +92,28 @@ with st.sidebar:
         api_input = st.text_input("Clé Gemini", value=st.session_state.api_key, type="password")
         if api_input: st.session_state.api_key = api_input
 
-    # Liste de modèles robuste (si l'API échoue à lister)
-    fallback_models = ["models/gemini-1.5-flash", "models/gemini-1.5-pro", "models/gemini-pro"]
+    # --- LOGIQUE DE RÉCUPÉRATION DE TOUS LES MODÈLES ---
+    all_available_models = []
 
-    st.session_state.selected_model = st.selectbox(
-        "Modèle IA",
-        fallback_models,
-        index=0
-    )
+    # 1. On essaie de récupérer la vraie liste depuis Google
+    if st.session_state.api_key:
+        try:
+            genai.configure(api_key=st.session_state.api_key)
+            models_iterable = genai.list_models()
+            # On garde tout ce qui supporte la génération de contenu
+            all_available_models = [m.name for m in models_iterable if
+                                    'generateContent' in m.supported_generation_methods]
+            # On trie (Reverse pour avoir les versions récentes en premier)
+            all_available_models.sort(reverse=True)
+        except Exception as e:
+            st.warning(f"Impossible de lister les modèles : {e}")
+
+    # 2. Si la liste est vide (erreur ou pas de clé), on met des défauts
+    if not all_available_models:
+        all_available_models = ["models/gemini-1.5-flash", "models/gemini-1.5-pro", "models/gemini-pro"]
+
+    st.session_state.selected_model = st.selectbox("Modèle IA", all_available_models)
+    st.caption(f"{len(all_available_models)} modèles trouvés.")
 
     st.divider()
 
@@ -262,10 +276,8 @@ if df_base is not None:
         with col_right:
             st.subheader("🧠 Générateur Flashcards")
 
-            # --- CONTEXT AWARENESS ---
             existing_cards_context = ""
             count_existing = 0
-
             if sh_obj:
                 df_c, _ = load_cards_data(sh_obj)
                 if not df_c.empty:
@@ -278,22 +290,24 @@ if df_base is not None:
                         existing_cards_context = "\n".join(cards_list)
 
             if count_existing > 0:
-                st.caption(f"ℹ️ Prend en compte {count_existing} cartes existantes.")
+                st.caption(f"ℹ️ {count_existing} cartes existantes.")
 
+            # --- FORMULAIRE RÉACTIVÉ MAIS AVEC TOUS LES MODÈLES ---
             with st.form("ai_form"):
                 mode = st.radio("Format", ["Format A: Cloze (Trous)", "Format B: Liste Différentiel"], horizontal=True)
                 custom_inst = st.text_input("Instruction spécifique")
-                submitted_gen = st.form_submit_button("✨ Générer (Incrémental)", type="primary")
+
+                # Le bouton submit du formulaire
+                submitted_gen = st.form_submit_button("✨ Générer les cartes", type="primary")
 
             if submitted_gen:
                 if not st.session_state.api_key:
-                    st.error("Manque clé API Gemini ! Vérifie la barre latérale.")
+                    st.error("⚠️ Clé API manquante. Vérifie la barre latérale.")
                 else:
                     try:
-                        # CONFIGURATION EXPLICITE À CHAQUE APPEL
                         genai.configure(api_key=st.session_state.api_key)
 
-                        # Paramètres de sécurité pour éviter les blocages "Médical = Gore"
+                        # Paramètres de sécurité (déblocage médical)
                         safety_settings = [
                             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                             {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -363,13 +377,12 @@ if df_base is not None:
                                     st.session_state.draft_cards.extend(new_batch)
                                     st.success(f"{len(new_batch)} nouvelles cartes !")
                                 else:
-                                    st.warning("Aucune carte valide trouvée dans la réponse.")
-                                    with st.expander("Voir la réponse brute pour débogage"):
-                                        st.write(clean)
+                                    st.warning("Aucune carte valide trouvée.")
+                                    with st.expander("Voir réponse brute"):
+                                        st.code(clean)
 
                     except Exception as e:
-                        st.error(f"ERREUR CRITIQUE IA : {e}")
-                        st.caption("Essaie de changer de modèle dans la barre latérale (ex: gemini-1.5-pro).")
+                        st.error(f"ERREUR : {e}")
 
             # --- PREVISUALISATION ---
             if st.session_state.draft_cards:
