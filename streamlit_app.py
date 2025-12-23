@@ -4,10 +4,13 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 import streamlit.components.v1 as components
+import google.generativeai as genai
 import re
+import io
+import time
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Radio Tracker", page_icon="🩻", layout="wide")
+st.set_page_config(page_title="Radio Tracker & AI", page_icon="🩻", layout="wide")
 
 st.markdown("""
     <style>
@@ -21,7 +24,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- CONNEXION ---
+# --- FONCTIONS DE CONNEXION ---
 @st.cache_resource
 def get_google_sheet_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -31,34 +34,65 @@ def get_google_sheet_client():
     return client
 
 
-# --- CHARGEMENT ---
 def load_data(client, sheet_url):
     try:
         sh = client.open_by_url(sheet_url)
-        worksheet = sh.get_worksheet(0)
+        worksheet = sh.get_worksheet(0)  # Onglet 1 : Articles
         data = worksheet.get_all_records()
         df = pd.DataFrame(data)
-        return df, worksheet
+        return df, worksheet, sh
     except Exception as e:
         st.error(f"Erreur de connexion : {e}")
-        return None, None
+        return None, None, None
+
+
+def load_cards_data(sh):
+    """Charge les cartes depuis l'onglet 'Cards'"""
+    try:
+        worksheet_cards = sh.worksheet("Cards")
+        data = worksheet_cards.get_all_records()
+        df_cards = pd.DataFrame(data)
+        # Colonnes attendues si vide
+        if df_cards.empty:
+            df_cards = pd.DataFrame(columns=['rid', 'article_title', 'system', 'card_type', 'question', 'answer'])
+        return df_cards, worksheet_cards
+    except gspread.exceptions.WorksheetNotFound:
+        st.error("L'onglet 'Cards' n'existe pas dans le Google Sheet. Crée-le svp !")
+        return pd.DataFrame(), None
+    except Exception as e:
+        st.error(f"Erreur chargement cartes: {e}")
+        return pd.DataFrame(), None
 
 
 def get_unique_tags(df, column_name):
-    """Récupère tous les tags uniques séparés par des virgules."""
-    if column_name not in df.columns:
-        return []
+    if column_name not in df.columns: return []
     all_text = ",".join(df[column_name].dropna().astype(str).tolist())
     tags = [t.strip() for t in all_text.split(',') if t.strip()]
     return sorted(list(set(tags)))
 
 
-# --- VARIABLES DE SESSION ---
-if "current_url" not in st.session_state:
-    st.session_state.current_url = None
+# --- VARIABLES SESSION ---
+if "current_url" not in st.session_state: st.session_state.current_url = None
+if "draft_cards" not in st.session_state: st.session_state.draft_cards = []
+if "api_key" not in st.session_state: st.session_state.api_key = ""
+
+# --- SIDEBAR (Configuration IA) ---
+with st.sidebar:
+    st.title("⚙️ Configuration")
+
+    # Clé API Gemini
+    api_input = st.text_input("Clé API Google Gemini", value=st.session_state.api_key, type="password")
+    if api_input: st.session_state.api_key = api_input
+
+    st.caption("Si tu n'as pas de clé, va sur Google AI Studio.")
+
+    st.divider()
+    st.write("🤖 **Paramètres IA**")
+    default_rules = "Create concise Anki cards. Focus on radiology signs, pathology, and differential diagnosis."
+    global_rules = st.text_area("Instructions Globales", value=default_rules, height=100)
 
 # --- DÉBUT APP ---
-st.title("🩻 Radio Études")
+st.title("🩻 Radio Études & AI Architect")
 
 try:
     sheet_url = st.secrets["private_sheet_url"]
@@ -69,196 +103,277 @@ except:
 if "client" not in st.session_state:
     st.session_state.client = get_google_sheet_client()
 
-# Chargement initial
+# Chargement Données Articles
 if "df" not in st.session_state:
-    df_load, worksheet = load_data(st.session_state.client, sheet_url)
+    df_load, worksheet, sh_obj = load_data(st.session_state.client, sheet_url)
 
-    # Nettoyage des booléens
     if df_load is not None:
         cols_to_bool = ['read_status', 'flashcards_made', 'ignored']
         if 'ignored' not in df_load.columns: df_load['ignored'] = False
-
         for col in cols_to_bool:
             if col in df_load.columns:
                 df_load[col] = df_load[col].apply(lambda x: True if str(x).lower() in ['oui', 'true', '1'] else False)
 
     st.session_state.df = df_load
     st.session_state.worksheet = worksheet
+    st.session_state.sh_obj = sh_obj
 else:
+    # Reconnexion si nécessaire
     if st.session_state.worksheet is None:
-        _, st.session_state.worksheet = load_data(st.session_state.client, sheet_url)
+        _, st.session_state.worksheet, st.session_state.sh_obj = load_data(st.session_state.client, sheet_url)
 
 df_base = st.session_state.df
 worksheet = st.session_state.worksheet
+sh_obj = st.session_state.sh_obj
 
-if df_base is not None:
-    # --- PRÉPARATION DE LA VUE ---
+# --- STRUCTURE DES ONGLETS ---
+tab1, tab2, tab3 = st.tabs(["📊 Tracker de Lecture", "🏭 Usine à Flashcards (IA)", "🗃️ Base de Cartes & Export"])
 
-    # 1. Nettoyage de la colonne "Voir" si elle traîne
-    if "Voir" in df_base.columns:
-        df_base.drop(columns=["Voir"], inplace=True)
+# ==========================================
+# TAB 1 : LE TRACKER (Ton ancienne app)
+# ==========================================
+with tab1:
+    if df_base is not None:
+        # Préparation Vue
+        if "Voir" in df_base.columns: df_base.drop(columns=["Voir"], inplace=True)
+        df_display = df_base.copy()
+        df_display.insert(0, "Voir", False)
+        if st.session_state.current_url:
+            mask = df_display['url'] == st.session_state.current_url
+            df_display.loc[mask, 'Voir'] = True
 
-    # 2. Création du DF d'affichage
-    df_display = df_base.copy()
+        # Filtres
+        with st.expander("🔍 Filtres & Affichage", expanded=True):
+            view_mode = st.radio("Mode :", ["📥 À traiter", "⛔ Ignorés", "📂 Tout"], horizontal=True)
+            st.divider()
+            c_f1, c_f2, c_f3 = st.columns(3)
+            with c_f1:
+                u_sys = get_unique_tags(df_base, 'system')
+                sel_sys = st.multiselect("Système (ET)", u_sys)
+            with c_f2:
+                u_sec = get_unique_tags(df_base, 'section')
+                sel_sec = st.multiselect("Section (ET)", u_sec)
+            with c_f3:
+                s_query = st.text_input("Recherche", "")
 
-    # 3. Ajout colonne Voir
-    df_display.insert(0, "Voir", False)
-    if st.session_state.current_url:
-        mask = df_display['url'] == st.session_state.current_url
-        df_display.loc[mask, 'Voir'] = True
+        # Logique Filtrage
+        df_display['ignored'] = df_display['ignored'].fillna(False).astype(bool)
+        if view_mode == "📥 À traiter":
+            filtered_df = df_display[~df_display['ignored']]
+        elif view_mode == "⛔ Ignorés":
+            filtered_df = df_display[df_display['ignored']]
+        else:
+            filtered_df = df_display
 
-    # --- ZONE DE FILTRES ---
-    with st.expander("🔍 Filtres & Affichage", expanded=True):
+        if sel_sys:
+            for s in sel_sys: filtered_df = filtered_df[
+                filtered_df['system'].astype(str).str.contains(re.escape(s), case=False, regex=True)]
+        if sel_sec:
+            for s in sel_sec: filtered_df = filtered_df[
+                filtered_df['section'].astype(str).str.contains(re.escape(s), case=False, regex=True)]
+        if s_query:
+            filtered_df = filtered_df[filtered_df['title'].str.contains(s_query, case=False, na=False)]
 
-        # Filtre de statut (Workflow)
-        view_mode = st.radio(
-            "Mode d'affichage :",
-            ["📥 À traiter (Actifs)", "⛔ Ignorés / Suspendus", "📂 Tout voir"],
-            horizontal=True
-        )
+        if not sel_sys and not sel_sec and not s_query and len(filtered_df) > 200:
+            filtered_df = filtered_df.head(200)
 
-        st.divider()
+        # Layout Tableau + Iframe
+        col1, col2 = st.columns([1.6, 1])
+        with col1:
+            st.subheader(f"Articles ({len(filtered_df)})")
 
-        col_f1, col_f2, col_f3 = st.columns(3)
-        with col_f1:
-            unique_systems = get_unique_tags(df_base, 'system')
-            selected_systems = st.multiselect("Filtrer par Système (ET)", unique_systems)
-        with col_f2:
-            unique_sections = get_unique_tags(df_base, 'section')
-            selected_sections = st.multiselect("Filtrer par Section (ET)", unique_sections)
-        with col_f3:
-            search_query = st.text_input("Recherche texte", "", placeholder="Titre...")
+            edited_df = st.data_editor(
+                filtered_df,
+                column_config={
+                    "rid": None, "content": None, "remote_last_mod_date": None, "url": None,
+                    "Voir": st.column_config.CheckboxColumn("👁️", width="small"),
+                    "title": st.column_config.TextColumn("Titre", disabled=True),
+                    "system": st.column_config.TextColumn("Système", width="small", disabled=True),
+                    "section": st.column_config.TextColumn("Section", width="small", disabled=True),
+                    "ignored": st.column_config.CheckboxColumn("⛔", width="small"),
+                    "read_status": st.column_config.CheckboxColumn("Lu ?", width="small"),
+                    "flashcards_made": st.column_config.CheckboxColumn("Flash ?", width="small"),
+                    "notes": st.column_config.TextColumn("Notes", width="medium"),
+                    "last_access": st.column_config.TextColumn("Dernier accès", disabled=True)
+                },
+                hide_index=True, use_container_width=True, key="editor"
+            )
 
-    # --- LOGIQUE DE FILTRAGE ---
-
-    # 1. FILTRE IGNORED
-    df_display['ignored'] = df_display['ignored'].fillna(False).astype(bool)
-
-    if view_mode == "📥 À traiter (Actifs)":
-        filtered_df = df_display[~df_display['ignored']]
-    elif view_mode == "⛔ Ignorés / Suspendus":
-        filtered_df = df_display[df_display['ignored']]
-    else:
-        filtered_df = df_display
-
-    # 2. SYSTÈME (Logique RESTRICTIVE "ET")
-    if selected_systems:
-        for sys_tag in selected_systems:
-            # On filtre itérativement : il faut que le système SOIT présent à chaque tour
-            filtered_df = filtered_df[
-                filtered_df['system'].astype(str).str.contains(re.escape(sys_tag), case=False, regex=True)
-            ]
-
-    # 3. SECTION (Logique RESTRICTIVE "ET")
-    if selected_sections:
-        for sec_tag in selected_sections:
-            filtered_df = filtered_df[
-                filtered_df['section'].astype(str).str.contains(re.escape(sec_tag), case=False, regex=True)
-            ]
-
-    # 4. TEXTE
-    if search_query:
-        filtered_df = filtered_df[
-            filtered_df['title'].str.contains(search_query, case=False, na=False)
-        ]
-
-    # Limite pour performance (optionnel, désactivé si beaucoup de filtres)
-    if not selected_systems and not selected_sections and not search_query and len(filtered_df) > 200:
-        filtered_df = filtered_df.head(200)
-
-    # --- LAYOUT PRINCIPAL ---
-    col1, col2 = st.columns([1.6, 1])
-
-    with col1:
-        st.subheader(f"Articles ({len(filtered_df)})")
-
-        # --- CONFIGURATION DES COLONNES ---
-        column_cfg = {
-            "rid": None, "content": None, "remote_last_mod_date": None,
-            "url": None,
-            "Voir": st.column_config.CheckboxColumn("👁️", width="small"),
-            "title": st.column_config.TextColumn("Titre", disabled=True),
-
-            "system": st.column_config.TextColumn("Système", width="small", disabled=True),
-            "section": st.column_config.TextColumn("Section", width="small", disabled=True),
-
-            "ignored": st.column_config.CheckboxColumn("⛔", width="small", help="Ignorer/Suspendre"),
-            "read_status": st.column_config.CheckboxColumn("Lu ?", width="small"),
-            "flashcards_made": st.column_config.CheckboxColumn("Flash ?", width="small"),
-            "notes": st.column_config.TextColumn("Notes", width="medium"),
-            "last_access": st.column_config.TextColumn("Dernier accès", disabled=True)
-        }
-
-        edited_df = st.data_editor(
-            filtered_df,
-            column_config=column_cfg,
-            hide_index=True,
-            use_container_width=True,
-            key="editor"
-        )
-
-        # --- GESTION DES CHANGEMENTS ---
-        changes = st.session_state["editor"]["edited_rows"]
-
-        if changes:
-            need_rerun = False
-
-            for index_in_view, change_dict in changes.items():
-
-                # A. CLIC SUR L'OEIL
-                if "Voir" in change_dict and change_dict["Voir"] == True:
-                    original_idx = filtered_df.index[index_in_view]
-                    selected_url = df_base.iloc[original_idx]['url']
-                    st.session_state.current_url = selected_url
-                    need_rerun = True
-
-                # B. MODIFICATION DE DONNÉES
-                data_changes = {k: v for k, v in change_dict.items() if k != "Voir"}
-
-                if data_changes:
-                    try:
-                        st.toast("⏳ Sauvegarde...", icon="☁️")
-
-                        # Retrouver la ligne réelle
-                        original_idx = filtered_df.index[index_in_view]
-                        real_rid = df_base.iloc[original_idx]['rid']
-
-                        # 1. MISE À JOUR GOOGLE SHEET (Cloud)
-                        cell = worksheet.find(str(real_rid))
-                        row_number = cell.row
-                        headers = worksheet.row_values(1)
-
-                        for col_name, new_value in data_changes.items():
-                            val_to_write = "Oui" if new_value is True else ("" if new_value is False else new_value)
-                            if col_name in headers:
-                                col_index = headers.index(col_name) + 1
-                                worksheet.update_cell(row_number, col_index, val_to_write)
-
-                                # 2. MISE À JOUR MÉMOIRE LOCALE
-                                st.session_state.df.at[original_idx, col_name] = new_value
-
-                        # Update date
-                        col_access = headers.index('last_access') + 1
-                        current_time = str(datetime.now())
-                        worksheet.update_cell(row_number, col_access, current_time)
-
-                        st.toast("✅ Sauvegardé !", icon="💾")
-
+            # Gestion Changements (Sauvegarde)
+            changes = st.session_state["editor"]["edited_rows"]
+            if changes:
+                need_rerun = False
+                for idx_view, chg in changes.items():
+                    if "Voir" in chg and chg["Voir"]:
+                        orig_idx = filtered_df.index[idx_view]
+                        st.session_state.current_url = df_base.iloc[orig_idx]['url']
                         need_rerun = True
 
-                    except Exception as e:
-                        st.error(f"Erreur de sauvegarde : {e}")
+                    data_chg = {k: v for k, v in chg.items() if k != "Voir"}
+                    if data_chg:
+                        try:
+                            st.toast("⏳ Sauvegarde...", icon="☁️")
+                            orig_idx = filtered_df.index[idx_view]
+                            real_rid = df_base.iloc[orig_idx]['rid']
 
-            if need_rerun:
+                            cell = worksheet.find(str(real_rid))
+                            row_n = cell.row
+                            headers = worksheet.row_values(1)
+
+                            for k, v in data_chg.items():
+                                val = "Oui" if v is True else ("" if v is False else v)
+                                if k in headers:
+                                    worksheet.update_cell(row_n, headers.index(k) + 1, val)
+                                    st.session_state.df.at[orig_idx, k] = v
+
+                            worksheet.update_cell(row_n, headers.index('last_access') + 1, str(datetime.now()))
+                            st.toast("✅ Sauvegardé !", icon="💾")
+                            need_rerun = True
+                        except Exception as e:
+                            st.error(f"Erreur: {e}")
+
+                if need_rerun: st.rerun()
+
+        with col2:
+            url = st.session_state.current_url
+            if url:
+                try:
+                    components.iframe(url, height=850, scrolling=True)
+                except:
+                    st.markdown(f"[Ouvrir]({url})")
+            else:
+                st.info("Sélectionne avec 👁️")
+
+# ==========================================
+# TAB 2 : USINE À FLASHCARDS (Ton code IA adapté)
+# ==========================================
+with tab2:
+    st.header("🏭 Générateur de Cartes (Gemini)")
+
+    if not st.session_state.api_key:
+        st.warning("⚠️ Entre ta clé API Gemini dans la barre latérale gauche pour commencer.")
+    else:
+        # Sélection de l'article depuis la base existante (df_base)
+        st.write("1️⃣ **Choisis un article source**")
+
+        # On utilise les filtres simples pour aider à trouver
+        c_sel1, c_sel2 = st.columns([1, 2])
+        f_sys_ia = c_sel1.selectbox("Filtrer liste par Système", ["Tout"] + u_sys)
+
+        candidates = df_base
+        if f_sys_ia != "Tout":
+            candidates = candidates[candidates['system'].astype(str).str.contains(re.escape(f_sys_ia), case=False)]
+
+        candidates['label'] = candidates['title'] + " (ID: " + candidates['rid'].astype(str) + ")"
+        sel_article_label = c_sel2.selectbox("Sélectionne l'article", candidates['label'].unique())
+
+        # Récupération du contenu
+        row_art = candidates[candidates['label'] == sel_article_label].iloc[0]
+
+        st.divider()
+        col_content, col_gen = st.columns(2)
+
+        with col_content:
+            st.subheader(f"📄 Contenu : {row_art['title']}")
+            st.text_area("Texte de l'article (source pour l'IA)", row_art['content'], height=500, disabled=True)
+
+        with col_gen:
+            st.subheader("🤖 Paramètres IA")
+            mode = st.radio("Type de cartes", ["Basic (Q&A)", "Cloze (Texte à trous)"], horizontal=True)
+            custom_inst = st.text_input("Instruction spécifique pour cet article")
+
+            if st.button("✨ Générer les cartes", type="primary", use_container_width=True):
+                try:
+                    genai.configure(api_key=st.session_state.api_key)
+                    model = genai.GenerativeModel("models/gemini-1.5-flash")  # Modèle rapide et efficace
+
+                    prompt = f"""
+                    Role: Expert Medical Tutor in Radiology.
+                    Global Rules: {global_rules}
+                    Specific Instructions: {custom_inst}
+                    Format: {mode}. If Cloze, use {{c1::hidden}}.
+                    Output: CSV format, semicolon (;) separator. NO headers.
+                    Text to process:
+                    {row_art['content']}
+                    """
+
+                    with st.spinner("L'IA réfléchit..."):
+                        response = model.generate_content(prompt)
+                        clean = response.text.replace("```csv", "").replace("```", "").strip()
+                        new_batch = []
+                        for l in clean.split('\n'):
+                            if ';' in l:
+                                parts = l.split(';', 1)
+                                new_batch.append({
+                                    "rid": str(row_art['rid']),
+                                    "article_title": row_art['title'],
+                                    "system": row_art['system'],
+                                    "card_type": mode,
+                                    "question": parts[0].strip(),
+                                    "answer": parts[1].strip()
+                                })
+                        st.session_state.draft_cards.extend(new_batch)
+                        st.success(f"{len(new_batch)} cartes générées ! (Voir ci-dessous)")
+
+                except Exception as e:
+                    st.error(f"Erreur IA : {e}")
+
+        # Zone des brouillons
+        if st.session_state.draft_cards:
+            st.divider()
+            st.subheader(f"📝 Brouillons en attente ({len(st.session_state.draft_cards)})")
+            st.caption("Ces cartes ne sont pas encore dans Google Sheets.")
+
+            draft_df = pd.DataFrame(st.session_state.draft_cards)
+            st.dataframe(draft_df[['question', 'answer']], use_container_width=True)
+
+            c_save, c_del = st.columns(2)
+            if c_save.button("☁️ Valider et Envoyer dans Google Sheets", type="primary"):
+                try:
+                    # Chargement ou création de l'onglet Cards
+                    _, ws_cards = load_cards_data(sh_obj)
+                    if ws_cards:
+                        # Conversion en liste de listes pour gspread
+                        rows_to_add = draft_df[
+                            ['rid', 'article_title', 'system', 'card_type', 'question', 'answer']].values.tolist()
+                        ws_cards.append_rows(rows_to_add)
+                        st.session_state.draft_cards = []  # Vide le brouillon
+                        st.success("Cartes sauvegardées dans l'onglet 'Cards' !")
+                        time.sleep(1)
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Erreur sauvegarde : {e}")
+
+            if c_del.button("🗑️ Tout jeter"):
+                st.session_state.draft_cards = []
                 st.rerun()
 
-    # --- VISUALISEUR ---
-    with col2:
-        url = st.session_state.current_url
-        if url:
-            try:
-                components.iframe(url, height=850, scrolling=True)
-            except:
-                st.markdown(f"[Ouvrir l'article]({url})")
-        else:
-            st.info("Sélectionne un article avec l'œil 👁️.")
+# ==========================================
+# TAB 3 : BASE DE DONNÉES & EXPORT
+# ==========================================
+with tab3:
+    st.header("🗃️ Mes Flashcards (Onglet 'Cards')")
+
+    if st.button("🔄 Rafraîchir la liste"):
+        st.cache_resource.clear()
+        st.rerun()
+
+    df_cards, _ = load_cards_data(sh_obj)
+
+    if not df_cards.empty:
+        st.write(f"Total : **{len(df_cards)} cartes**")
+        st.dataframe(df_cards, use_container_width=True)
+
+        # Export Anki
+        out = io.StringIO()
+        out.write("#separator:Semicolon\n#html:true\n#tags column:4\n")
+        for _, r in df_cards.iterrows():
+            q = str(r['question']).replace(';', ',')
+            a = str(r['answer']).replace(';', ',')
+            tag = str(r['article_title']).replace(' ', '_').replace(';', '')
+            out.write(f"{r['card_type']};{q};{a};{tag}\n")
+
+        st.download_button("⬇️ Télécharger pour Anki (.txt)", data=out.getvalue(),
+                           file_name=f"anki_export_{datetime.date.today()}.txt")
+    else:
+        st.info("Aucune carte trouvée. Va dans l'onglet 'Usine à Flashcards' pour en créer !")
