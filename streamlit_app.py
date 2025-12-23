@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
-from datetime import datetime
+from datetime import datetime, date  # <--- CORRECTION ICI (Import des deux outils)
 import streamlit.components.v1 as components
 import google.generativeai as genai
 import re
@@ -53,7 +53,6 @@ def load_cards_data(sh):
         data = worksheet_cards.get_all_records()
         df_cards = pd.DataFrame(data)
         if df_cards.empty:
-            # On ajoute 'tags' à la structure
             df_cards = pd.DataFrame(
                 columns=['rid', 'article_title', 'system', 'card_type', 'question', 'answer', 'tags'])
         return df_cards, worksheet_cards
@@ -78,11 +77,10 @@ if "draft_cards" not in st.session_state: st.session_state.draft_cards = []
 if "api_key" not in st.session_state: st.session_state.api_key = ""
 if "selected_model" not in st.session_state: st.session_state.selected_model = "models/gemini-pro"
 
-# --- SIDEBAR (Configuration IA & Modèle) ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.title("⚙️ Configuration")
 
-    # 1. Gestion de la Clé API
     if "GEMINI_API_KEY" in st.secrets:
         st.session_state.api_key = st.secrets["GEMINI_API_KEY"]
         st.success("🔑 Clé API chargée")
@@ -92,7 +90,6 @@ with st.sidebar:
 
     st.divider()
 
-    # 2. Sélecteur de Modèle
     st.write("🤖 **Modèle IA**")
     available_models = ["models/gemini-1.5-flash", "models/gemini-pro"]
 
@@ -107,9 +104,8 @@ with st.sidebar:
             pass
 
     st.session_state.selected_model = st.selectbox("Choisir le modèle :", available_models, index=0)
-
     st.divider()
-    st.info("ℹ️ Le Prompt 'Crack the Core' est actif par défaut.")
+    st.info("ℹ️ Prompt 'Crack the Core' actif.")
 
 # --- DÉBUT APP ---
 st.title("🩻 Radio Architect & Tracker")
@@ -123,7 +119,6 @@ except:
 if "client" not in st.session_state:
     st.session_state.client = get_google_sheet_client()
 
-# Chargement Données Articles
 if "df" not in st.session_state:
     df_load, worksheet, sh_obj = load_data(st.session_state.client, sheet_url)
 
@@ -145,7 +140,6 @@ df_base = st.session_state.df
 worksheet = st.session_state.worksheet
 sh_obj = st.session_state.sh_obj
 
-# --- STRUCTURE DES ONGLETS ---
 tab1, tab2, tab3 = st.tabs(["📊 Tracker", "🏭 Usine à Flashcards (Architect)", "🗃️ Base & Export"])
 
 # ==========================================
@@ -299,11 +293,9 @@ with tab2:
                     genai.configure(api_key=st.session_state.api_key)
                     model = genai.GenerativeModel(st.session_state.selected_model)
 
-                    # --- TON SYSTEM PROMPT INTÉGRÉ ICI ---
                     system_prompt = """
                     System Prompt: Radiology Board Exam Anki Architect
                     Role: You are the Lead Editor for the "Crack the Core" Radiology Board Review Series. Your task is to convert raw medical text into high-performance Anki flashcards that mimic the style and difficulty of the ABR Core Exam.
-
                     Objective: Maximize retention of "Aunt Minnie" diagnoses, critical differentiators, and board-relevant epidemiology while minimizing card count. Quality over quantity.
 
                     1. The "Board Filter" (Selection Criteria)
@@ -341,22 +333,18 @@ with tab2:
 
                     full_prompt = f"""
                     {system_prompt}
-
                     CURRENT TASK:
                     - Format requested: {mode}
                     - Additional User Instructions: {custom_inst}
-
                     TEXT TO PROCESS:
                     {row_art['content']}
                     """
 
                     with st.spinner(f"L'Architecte analyse avec {st.session_state.selected_model}..."):
                         response = model.generate_content(full_prompt)
-                        clean = response.text.replace("```", "").strip()  # Nettoyage basique
-
+                        clean = response.text.replace("```", "").strip()
                         new_batch = []
                         for l in clean.split('\n'):
-                            # On cherche le séparateur PIPE |
                             if '|' in l:
                                 parts = l.split('|')
                                 if len(parts) >= 2:
@@ -378,9 +366,7 @@ with tab2:
                             st.session_state.draft_cards.extend(new_batch)
                             st.success(f"{len(new_batch)} cartes de haute qualité générées !")
                         else:
-                            st.warning(
-                                "L'IA n'a pas généré de cartes valides. Essaie un autre modèle ou vérifie le texte.")
-                            st.write("Réponse brute de l'IA pour débogage :", clean)
+                            st.warning("Aucune carte générée. Vérifie le modèle ou le texte.")
 
                 except Exception as e:
                     st.error(f"Erreur IA : {e}")
@@ -390,7 +376,6 @@ with tab2:
             st.subheader(f"📝 Brouillons ({len(st.session_state.draft_cards)})")
 
             draft_df = pd.DataFrame(st.session_state.draft_cards)
-            # Affichage personnalisé avec Tags
             st.dataframe(draft_df[['question', 'answer', 'tags']], use_container_width=True)
 
             c_save, c_del = st.columns(2)
@@ -398,16 +383,13 @@ with tab2:
                 try:
                     _, ws_cards = load_cards_data(sh_obj)
                     if ws_cards:
-                        # On prépare les colonnes pour gspread (ajout de tags)
-                        # Ordre: rid, article_title, system, card_type, question, answer, tags
                         rows_to_add = []
                         for _, row in draft_df.iterrows():
                             rows_to_add.append([
                                 row['rid'], row['article_title'], row['system'],
                                 row['card_type'], row['question'], row['answer'],
-                                row.get('tags', '')  # Sécurité si tags manquant
+                                row.get('tags', '')
                             ])
-
                         ws_cards.append_rows(rows_to_add)
                         st.session_state.draft_cards = []
                         st.success("Sauvegardé dans 'Cards' avec succès !")
@@ -436,24 +418,19 @@ with tab3:
         st.dataframe(df_cards, use_container_width=True)
 
         out = io.StringIO()
-        # En-tête compatible Anki
         out.write("#separator:Pipe\n#html:true\n#tags column:4\n")
 
         for _, r in df_cards.iterrows():
-            # Nettoyage des pipes dans le texte pour ne pas casser l'export
             q = str(r['question']).replace('|', '/')
             a = str(r['answer']).replace('|', '/')
-
-            # Gestion des tags : on utilise ceux générés par l'IA s'ils existent
             if 'tags' in r and str(r['tags']).strip() != "":
                 tag = str(r['tags']).strip()
             else:
                 tag = str(r['article_title']).replace(' ', '_')
-
-            # Export séparé par des Pipes |
             out.write(f"{q}|{a}|{r['card_type']}|{tag}\n")
 
+        # CORRECTION ICI : Utilisation de date.today()
         st.download_button("⬇️ Télécharger Export Anki (.txt)", data=out.getvalue(),
-                           file_name=f"anki_board_prep_{datetime.date.today()}.txt")
+                           file_name=f"anki_board_prep_{date.today()}.txt")
     else:
         st.info("Aucune carte trouvée.")
