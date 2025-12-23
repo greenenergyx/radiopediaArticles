@@ -81,7 +81,7 @@ if "api_key" not in st.session_state: st.session_state.api_key = ""
 if "selected_model" not in st.session_state: st.session_state.selected_model = "models/gemini-1.5-flash"
 
 # ==========================================
-# 4. SIDEBAR (LISTE COMPLÈTE DES MODÈLES)
+# 4. SIDEBAR (LISTE DYNAMIQUE FORCÉE)
 # ==========================================
 with st.sidebar:
     st.header("⚙️ Config")
@@ -92,28 +92,43 @@ with st.sidebar:
         api_input = st.text_input("Clé Gemini", value=st.session_state.api_key, type="password")
         if api_input: st.session_state.api_key = api_input
 
-    # --- LOGIQUE DE RÉCUPÉRATION DE TOUS LES MODÈLES ---
-    all_available_models = []
+    st.divider()
+    st.write("🤖 **Sélection du Modèle**")
 
-    # 1. On essaie de récupérer la vraie liste depuis Google
+    # --- LOGIQUE DE RECUPERATION EXTENSIVE ---
+    model_options = []
+
     if st.session_state.api_key:
         try:
             genai.configure(api_key=st.session_state.api_key)
-            models_iterable = genai.list_models()
-            # On garde tout ce qui supporte la génération de contenu
-            all_available_models = [m.name for m in models_iterable if
-                                    'generateContent' in m.supported_generation_methods]
-            # On trie (Reverse pour avoir les versions récentes en premier)
-            all_available_models.sort(reverse=True)
+
+            # On récupère TOUS les modèles sans filtre initial
+            all_models_raw = genai.list_models()
+
+            # On filtre ceux qui savent générer du texte ('generateContent')
+            for m in all_models_raw:
+                if 'generateContent' in m.supported_generation_methods:
+                    model_options.append(m.name)
+
+            # Tri alphabétique inverse pour avoir les versions récentes (1.5, 2.0) en haut
+            model_options.sort(reverse=True)
+
         except Exception as e:
-            st.warning(f"Impossible de lister les modèles : {e}")
+            st.error(f"Erreur API Google : {e}")
 
-    # 2. Si la liste est vide (erreur ou pas de clé), on met des défauts
-    if not all_available_models:
-        all_available_models = ["models/gemini-1.5-flash", "models/gemini-1.5-pro", "models/gemini-pro"]
+    # Si la liste est vide (pas de clé ou erreur), on met une liste de secours minimale
+    if not model_options:
+        model_options = ["models/gemini-1.5-flash", "models/gemini-pro"]
+        st.caption("⚠️ Liste par défaut (API non connectée ou erreur)")
+    else:
+        st.caption(f"✅ {len(model_options)} modèles disponibles pour votre compte.")
 
-    st.session_state.selected_model = st.selectbox("Modèle IA", all_available_models)
-    st.caption(f"{len(all_available_models)} modèles trouvés.")
+    # Menu déroulant avec TOUS les modèles trouvés
+    st.session_state.selected_model = st.selectbox(
+        "Choisir le modèle :",
+        model_options,
+        index=0
+    )
 
     st.divider()
 
@@ -292,22 +307,18 @@ if df_base is not None:
             if count_existing > 0:
                 st.caption(f"ℹ️ {count_existing} cartes existantes.")
 
-            # --- FORMULAIRE RÉACTIVÉ MAIS AVEC TOUS LES MODÈLES ---
-            with st.form("ai_form"):
-                mode = st.radio("Format", ["Format A: Cloze (Trous)", "Format B: Liste Différentiel"], horizontal=True)
-                custom_inst = st.text_input("Instruction spécifique")
+            # --- BOUTONS D'ACTION DIRECTS (PLUS DE FORMULAIRE) ---
 
-                # Le bouton submit du formulaire
-                submitted_gen = st.form_submit_button("✨ Générer les cartes", type="primary")
+            mode = st.radio("Format", ["Format A: Cloze (Trous)", "Format B: Liste Différentiel"], horizontal=True)
+            custom_inst = st.text_input("Instruction spécifique")
 
-            if submitted_gen:
+            if st.button("✨ Générer les cartes", type="primary", key="gen_btn"):
                 if not st.session_state.api_key:
                     st.error("⚠️ Clé API manquante. Vérifie la barre latérale.")
                 else:
                     try:
                         genai.configure(api_key=st.session_state.api_key)
 
-                        # Paramètres de sécurité (déblocage médical)
                         safety_settings = [
                             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                             {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -349,7 +360,7 @@ if df_base is not None:
 
                         full_prompt = f"{sys_prompt}\n{memory_block}\nArticle: {current_row['title']}\nFormat: {mode}\nInstr: {custom_inst}\nText:\n{current_row['content']}"
 
-                        with st.spinner(f"Génération ({st.session_state.selected_model})..."):
+                        with st.spinner(f"Génération avec {st.session_state.selected_model}..."):
                             resp = model.generate_content(full_prompt)
 
                             if not resp.text:
