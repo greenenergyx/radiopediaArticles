@@ -8,7 +8,6 @@ import google.generativeai as genai
 import io
 import re
 import time
-import os
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Radiopaedia Cockpit", page_icon="🩻", layout="wide")
@@ -17,7 +16,10 @@ st.set_page_config(page_title="Radiopaedia Cockpit", page_icon="🩻", layout="w
 st.markdown("""
     <style>
         .block-container {padding-top: 1rem; padding-bottom: 3rem;}
+        div[data-testid="stExpander"] div[role="button"] p {font-weight: 600;}
         .stButton button {width: 100%;}
+        h1 {font-size: 1.8rem !important;}
+        .stDataEditor {border: 1px solid #ddd;}
     </style>
 """, unsafe_allow_html=True)
 
@@ -58,7 +60,8 @@ def load_cards_data(sh):
             df_cards = pd.DataFrame(columns=columns)
         else:
             for col in columns:
-                if col not in df_cards.columns: df_cards[col] = ""
+                if col not in df_cards.columns:
+                    df_cards[col] = ""
         return df_cards, worksheet_cards
     except:
         return pd.DataFrame(), None
@@ -74,48 +77,53 @@ def get_unique_tags(df, column_name):
 # --- STATE ---
 if "current_rid" not in st.session_state: st.session_state.current_rid = None
 if "draft_cards" not in st.session_state: st.session_state.draft_cards = []
+if "api_key" not in st.session_state: st.session_state.api_key = ""
+if "selected_model" not in st.session_state: st.session_state.selected_model = ""
 
-# --- SIDEBAR & AI SETUP ---
+# --- SIDEBAR (CORRECTION: Utilisation stricte de ListModels) ---
 with st.sidebar:
     st.header("⚙️ AI Config")
 
-    # Récupération Clé API
-    api_key = st.secrets.get("GEMINI_API_KEY", "")
-    if not api_key:
-        api_key = st.text_input("Gemini API Key", type="password")
+    # 1. API Key
+    if "GEMINI_API_KEY" in st.secrets:
+        st.session_state.api_key = st.secrets["GEMINI_API_KEY"]
+    else:
+        st.session_state.api_key = st.text_input("Gemini API Key", type="password")
 
-    # 1. Configuration FORCEE avec transport REST (Fix firewall issues)
-    if api_key:
-        genai.configure(api_key=api_key, transport="rest")
-
-    # 2. Hardcoded Model Selection (Bypassing ListModels if it fails)
-    # On propose les 3 modèles clés. Pas de requête dynamique risquée.
-    model_map = {
-        "Gemini 1.5 Flash (Fastest)": "gemini-1.5-flash",
-        "Gemini 1.5 Pro (Best)": "gemini-1.5-pro",
-        "Gemini 1.0 Pro (Legacy)": "gemini-pro"
-    }
-
-    selected_name = st.selectbox("Model", list(model_map.keys()), index=0)
-    selected_model_id = model_map[selected_name]
-
-    # 3. Diagnostic Visuel
-    st.divider()
-    st.caption(f"📚 Lib Version: {genai.__version__}")
-    st.caption(f"🤖 Target: {selected_model_id}")
-
-    if st.button("🔌 Test Connection"):
+    # 2. Dynamic Listing (Ce que l'erreur demande)
+    fetched_models = []
+    if st.session_state.api_key:
         try:
-            model = genai.GenerativeModel(selected_model_id)
-            response = model.generate_content("Hello")
-            st.success("OK! Connected.")
+            genai.configure(api_key=st.session_state.api_key)
+
+            # APPEL À L'API POUR LISTER LES MODÈLES
+            all_models = genai.list_models()
+
+            for m in all_models:
+                # On ne garde que ceux qui peuvent générer du texte
+                if 'generateContent' in m.supported_generation_methods:
+                    fetched_models.append(m.name)
+
+            # Tri pour avoir les versions récentes en haut (souvent les numéros les plus élevés)
+            fetched_models.sort(reverse=True)
+
         except Exception as e:
-            st.error(f"Fail: {e}")
+            st.error(f"❌ API Error: {e}")
+
+    # 3. Affichage du menu
+    if fetched_models:
+        st.success(f"✅ {len(fetched_models)} Models Found")
+        st.session_state.selected_model = st.selectbox("Select Model", fetched_models)
+        st.caption(f"Active ID: `{st.session_state.selected_model}`")
+    elif st.session_state.api_key:
+        st.warning("⚠️ Connected, but NO models returned by Google. Check API permissions.")
+    else:
+        st.info("Enter Key to load models.")
 
     # Export Anki
     if "sh_obj" in st.session_state and st.session_state.sh_obj:
         st.divider()
-        if st.button("📥 Export Anki"):
+        if st.button("📥 Export Anki (.txt)"):
             df_c, _ = load_cards_data(st.session_state.sh_obj)
             if not df_c.empty:
                 out = io.StringIO()
@@ -125,12 +133,13 @@ with st.sidebar:
                     a = str(r['answer']).replace('|', '/')
                     tag = str(r.get('tags', '')).strip() or str(r['article_title']).replace(' ', '_')
                     out.write(f"{q}|{a}|{r['card_type']}|{tag}\n")
-                st.download_button("Download .txt", data=out.getvalue(), file_name=f"anki_{date.today()}.txt")
+                st.download_button("Download", data=out.getvalue(), file_name=f"anki_{date.today()}.txt")
 
 # --- MAIN APP ---
 try:
     sheet_url = st.secrets["private_sheet_url"]
 except:
+    st.warning("Missing 'private_sheet_url' in st.secrets")
     st.stop()
 
 if "client" not in st.session_state: st.session_state.client = get_google_sheet_client()
@@ -274,16 +283,16 @@ if df_base is not None:
                 instr = st.text_input("Instructions", placeholder="Ex: Focus on MRI findings...")
 
                 if st.button("✨ Generate Cards", type="primary"):
-                    if not api_key:
-                        st.error("Missing API Key (Sidebar)")
+                    if not st.session_state.api_key or not st.session_state.selected_model:
+                        st.error("No Model Selected (Check Sidebar)")
                     else:
                         try:
-                            with st.spinner(f"Thinking ({selected_model_id})..."):
-                                # Ensure config is set right before call
-                                genai.configure(api_key=api_key, transport="rest")
-                                model = genai.GenerativeModel(selected_model_id)
+                            with st.spinner(f"Generating using {st.session_state.selected_model}..."):
+                                # Utilisation de la configuration dynamique
+                                genai.configure(api_key=st.session_state.api_key)
+                                model = genai.GenerativeModel(st.session_state.selected_model)
 
-                                # Prompt
+                                # Prompt in English
                                 mem = f"DO NOT generate these questions again (already done):\n{existing_ctx}" if existing_ctx else ""
                                 sys = """Role: Elite Medical Editor. Goal: Create Anki flashcards.
                                 Rules:
