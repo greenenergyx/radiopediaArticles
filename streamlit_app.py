@@ -81,7 +81,7 @@ if "api_key" not in st.session_state: st.session_state.api_key = ""
 if "selected_model" not in st.session_state: st.session_state.selected_model = "models/gemini-1.5-flash"
 
 # ==========================================
-# 4. SIDEBAR (LISTE DYNAMIQUE FORCÉE)
+# 4. SIDEBAR (LISTE BRUTE SANS FILTRE)
 # ==========================================
 with st.sidebar:
     st.header("⚙️ Config")
@@ -93,37 +93,38 @@ with st.sidebar:
         if api_input: st.session_state.api_key = api_input
 
     st.divider()
-    st.write("🤖 **Sélection du Modèle**")
+    st.write("🤖 **Modèle IA**")
 
-    # --- LOGIQUE DE RECUPERATION EXTENSIVE ---
     model_options = []
 
     if st.session_state.api_key:
         try:
+            # Configuration FORCEE avant l'appel
             genai.configure(api_key=st.session_state.api_key)
 
-            # On récupère TOUS les modèles sans filtre initial
-            all_models_raw = genai.list_models()
+            # Appel brut à l'API Google
+            all_models_raw = list(genai.list_models())
 
-            # On filtre ceux qui savent générer du texte ('generateContent')
+            # Filtrage technique uniquement (on garde tout ce qui génère du texte)
             for m in all_models_raw:
                 if 'generateContent' in m.supported_generation_methods:
                     model_options.append(m.name)
 
-            # Tri alphabétique inverse pour avoir les versions récentes (1.5, 2.0) en haut
+            # Tri alphabétique inverse (souvent les versions récentes sont en bas ou en haut selon la nomenclature)
+            # On trie pour avoir gemini-1.5 avant gemini-1.0
             model_options.sort(reverse=True)
 
+            st.caption(f"✅ {len(model_options)} modèles trouvés via l'API.")
+
         except Exception as e:
-            st.error(f"Erreur API Google : {e}")
+            st.error(f"Erreur API : {e}")
+            st.warning("Vérifie ta clé API.")
 
-    # Si la liste est vide (pas de clé ou erreur), on met une liste de secours minimale
+    # Si la liste est vide, on ne met PAS de fallback, on laisse vide pour que tu voies le problème
     if not model_options:
-        model_options = ["models/gemini-1.5-flash", "models/gemini-pro"]
-        st.caption("⚠️ Liste par défaut (API non connectée ou erreur)")
-    else:
-        st.caption(f"✅ {len(model_options)} modèles disponibles pour votre compte.")
+        st.error("Aucun modèle trouvé. Vérifie requirements.txt et ta clé.")
+        model_options = ["models/gemini-1.5-flash"]  # Juste un pour éviter le crash de l'interface
 
-    # Menu déroulant avec TOUS les modèles trouvés
     st.session_state.selected_model = st.selectbox(
         "Choisir le modèle :",
         model_options,
@@ -307,11 +308,10 @@ if df_base is not None:
             if count_existing > 0:
                 st.caption(f"ℹ️ {count_existing} cartes existantes.")
 
-            # --- BOUTONS D'ACTION DIRECTS (PLUS DE FORMULAIRE) ---
-
             mode = st.radio("Format", ["Format A: Cloze (Trous)", "Format B: Liste Différentiel"], horizontal=True)
             custom_inst = st.text_input("Instruction spécifique")
 
+            # --- BOUTON DE GENERATION SIMPLE ---
             if st.button("✨ Générer les cartes", type="primary", key="gen_btn"):
                 if not st.session_state.api_key:
                     st.error("⚠️ Clé API manquante. Vérifie la barre latérale.")
@@ -360,7 +360,7 @@ if df_base is not None:
 
                         full_prompt = f"{sys_prompt}\n{memory_block}\nArticle: {current_row['title']}\nFormat: {mode}\nInstr: {custom_inst}\nText:\n{current_row['content']}"
 
-                        with st.spinner(f"Génération avec {st.session_state.selected_model}..."):
+                        with st.spinner(f"Génération ({st.session_state.selected_model})..."):
                             resp = model.generate_content(full_prompt)
 
                             if not resp.text:
