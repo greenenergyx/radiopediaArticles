@@ -26,7 +26,7 @@ st.markdown("""
 
 
 # ==========================================
-# 2. FONCTIONS BACKEND
+# 2. FONCTIONS BACKEND (GOOGLE SHEETS)
 # ==========================================
 @st.cache_resource
 def get_google_sheet_client():
@@ -81,17 +81,19 @@ if "api_key" not in st.session_state: st.session_state.api_key = ""
 if "selected_model" not in st.session_state: st.session_state.selected_model = ""
 
 # ==========================================
-# 4. SIDEBAR
+# 4. BARRE LATÉRALE (CONFIG IA)
 # ==========================================
 with st.sidebar:
     st.header("⚙️ Config IA")
+
+    # Clé API
     if "GEMINI_API_KEY" in st.secrets:
         st.session_state.api_key = st.secrets["GEMINI_API_KEY"]
     else:
         api_input = st.text_input("Clé Gemini", value=st.session_state.api_key, type="password")
         if api_input: st.session_state.api_key = api_input
 
-    # Détection Modèles
+    # Détection des modèles
     fetched_models = []
     if st.session_state.api_key:
         try:
@@ -105,12 +107,17 @@ with st.sidebar:
             pass
 
     if fetched_models:
+        # Sélection intelligente (Flash par défaut)
         default_idx = 0
         for i, name in enumerate(fetched_models):
             if "flash" in name.lower(): default_idx = i; break
         st.session_state.selected_model = st.selectbox("Modèle IA", fetched_models, index=default_idx)
+    elif st.session_state.api_key:
+        st.warning("Clé valide mais aucun modèle trouvé (vérifier API Generative Language).")
 
     st.divider()
+
+    # Export Anki
     if "sh_obj" in st.session_state and st.session_state.sh_obj:
         st.subheader("📤 Export")
         if st.button("Télécharger Anki (.txt)"):
@@ -126,7 +133,7 @@ with st.sidebar:
                 st.download_button("Sauvegarder", data=out.getvalue(), file_name=f"anki_{date.today()}.txt")
 
 # ==========================================
-# 5. CHARGEMENT INITIAL
+# 5. CHARGEMENT DONNÉES
 # ==========================================
 try:
     sheet_url = st.secrets["private_sheet_url"]
@@ -156,12 +163,12 @@ worksheet = st.session_state.worksheet
 sh_obj = st.session_state.sh_obj
 
 # ==========================================
-# 6. INTERFACE
+# 6. INTERFACE PRINCIPALE
 # ==========================================
 st.title("🩻 Radiologie Cockpit")
 
 if df_base is not None:
-    # --- TRACKER ---
+    # --- TRACKER (Tableau du haut) ---
     with st.expander("🔍 Filtrer la liste", expanded=False):
         c1, c2, c3, c4 = st.columns(4)
         view_mode = c1.radio("Vue", ["📥 À faire", "✅ Fait", "📂 Tout"], horizontal=True)
@@ -242,7 +249,7 @@ if df_base is not None:
                     pass
         if need_rerun: st.rerun()
 
-    # --- ESPACE DE TRAVAIL ---
+    # --- ESPACE DE TRAVAIL (BAS) ---
     if st.session_state.current_rid:
         current_row_mask = df_base['rid'].astype(str) == str(st.session_state.current_rid)
         if current_row_mask.any():
@@ -251,6 +258,7 @@ if df_base is not None:
             st.markdown("---")
             col_left, col_right = st.columns([1, 1])
 
+            # GAUCHE : ARTICLE
             with col_left:
                 st.subheader(f"📖 {current_row['title']}")
                 if current_row['url']:
@@ -259,14 +267,15 @@ if df_base is not None:
                     except:
                         st.markdown(f"[Lien externe]({current_row['url']})")
 
+            # DROITE : GÉNÉRATEUR
             with col_right:
                 st.subheader("🧠 Générateur Interactif")
 
-                # 1. CONSTRUIRE LE CONTEXTE EXISTANT (Mémoire)
+                # 1. Préparation de la Mémoire (Cartes existantes)
                 existing_context_text = ""
                 card_count = 0
 
-                # A. Cartes déjà dans le Sheet
+                # A. Cartes du Sheet
                 if sh_obj:
                     df_c, _ = load_cards_data(sh_obj)
                     if not df_c.empty:
@@ -277,24 +286,24 @@ if df_base is not None:
                             for _, r in saved_cards.iterrows():
                                 existing_context_text += f"Q: {r['question']} | A: {r['answer']}\n"
 
-                # B. Cartes actuellement dans le brouillon (Session State)
+                # B. Cartes du Brouillon
                 if st.session_state.draft_cards:
                     card_count += len(st.session_state.draft_cards)
-                    existing_context_text += "--- CARDS CURRENTLY IN DRAFT (Do not duplicate) ---\n"
+                    existing_context_text += "--- CARDS IN DRAFT (Do not duplicate) ---\n"
                     for r in st.session_state.draft_cards:
                         existing_context_text += f"Q: {r['question']} | A: {r['answer']}\n"
 
                 if card_count > 0:
-                    st.info(f"ℹ️ L'IA prendra en compte {card_count} cartes existantes pour éviter les doublons.")
+                    st.info(f"ℹ️ {card_count} cartes connues par l'IA (évitement de doublons actif).")
 
+                # 2. Formulaire
                 with st.form("ai_form"):
-                    mode = st.radio("Format", ["Format A: Cloze (Trous)", "Format B: Liste Différentiel"],
-                                    horizontal=True)
+                    mode = st.radio("Format", ["Cloze (Texte à trous)", "Basic (Question/Réponse)"], horizontal=True)
                     custom_inst = st.text_input("Instruction (ex: focus anatomie)")
-                    # Changement du label pour refléter l'action
-                    label_btn = "✨ Générer des cartes" if card_count == 0 else "➕ Générer des cartes COMPLÉMENTAIRES"
+                    label_btn = "✨ Générer des cartes" if card_count == 0 else "➕ Ajouter des cartes COMPLÉMENTAIRES"
                     submitted_gen = st.form_submit_button(label_btn, type="primary")
 
+                # 3. Logique de Génération
                 if submitted_gen:
                     if not st.session_state.api_key:
                         st.error("Manque clé API.")
@@ -303,66 +312,74 @@ if df_base is not None:
                             genai.configure(api_key=st.session_state.api_key)
                             model = genai.GenerativeModel(st.session_state.selected_model)
 
+                            # PROMPT OPTIMISÉ (Réponse vide pour Cloze)
                             sys_prompt = """
-                            System Prompt: Radiology Board Exam Anki Architect v3.0
-                            Role: Create "Stand-Alone" Anki cards.
+                            System Prompt: Radiology Anki Architect v3.1
+                            Role: Create Anki cards.
 
                             CONTEXT AWARENESS:
-                            - Read the 'EXISTING CARDS' list below carefully.
-                            - DO NOT generate questions that test the exact same fact as an existing card.
-                            - FIND NEW ANGLES or missing information to complement the existing set.
+                            - Read 'EXISTING CARDS'. Avoid duplicates.
+                            - Find new complementary angles.
 
-                            CRITICAL RULE: STAND-ALONE
-                            - Never use "It", "They". Always name the pathology.
-                            - Bad: "It is located in..."
-                            - Good: "{{c1::Glioblastoma}} is located in..."
+                            FORMATTING RULES (CRITICAL):
 
-                            FORMATTING RULES
-                            1. Format A (Cloze): [Pathology] + [Verb] + {{c1::[Fact]}}.
-                            2. Format B (List): Only for lists.
-                            3. Output: Question|Answer|Tag
+                            1. FORMAT CLOZE (Standard):
+                            - Structure: {{c1::Pathology}} shows {{c2::sign}}.
+                            - COL 1 (Question): FULL sentence with clozes.
+                            - COL 2 (Answer): EMPTY (!!!). Do not repeat the answer. Only use for extra notes/mnemonics.
+                            - COL 3 (Tag): System/Section.
+
+                            2. FORMAT BASIC:
+                            - COL 1: Question.
+                            - COL 2: Answer.
+                            - COL 3: Tag.
+
+                            OUTPUT: Column1|Column2|Column3
                             """
 
                             full_prompt = f"{sys_prompt}\n\nEXISTING CARDS:\n{existing_context_text}\n\nArticle: {current_row['title']}\nFormat: {mode}\nInstr: {custom_inst}\nText:\n{current_row['content']}"
 
-                            with st.spinner(f"Analyse complémentaire ({st.session_state.selected_model})..."):
+                            with st.spinner(f"Réflexion ({st.session_state.selected_model})..."):
                                 resp = model.generate_content(full_prompt)
                                 clean = resp.text.replace("```", "").strip()
 
                                 new_batch = []
                                 for l in clean.split('\n'):
-                                    if '|' in l and len(l.split('|')) >= 2:
+                                    if '|' in l:
                                         p = l.split('|')
-                                        q, a, t = p[0].strip(), p[1].strip(), p[2].strip() if len(p) > 2 else ""
-                                        if len(q) > 5 and "Question" not in q:
-                                            new_batch.append({
-                                                "rid": str(current_row['rid']),
-                                                "article_title": current_row['title'],
-                                                "system": current_row['system'],
-                                                "card_type": "Cloze" if "{{" in q else "Basic",
-                                                "question": q, "answer": a, "tags": t
-                                            })
+                                        if len(p) >= 2:
+                                            q = p[0].strip()
+                                            a = p[1].strip()
+                                            t = p[2].strip() if len(p) > 2 else ""
+
+                                            # Validation
+                                            if len(q) > 5 and "Question" not in q:
+                                                new_batch.append({
+                                                    "rid": str(current_row['rid']),
+                                                    "article_title": current_row['title'],
+                                                    "system": current_row['system'],
+                                                    "card_type": "Cloze" if "{{" in q else "Basic",
+                                                    "question": q, "answer": a, "tags": t
+                                                })
 
                                 if new_batch:
-                                    # ICI LA MAGIE : On étend la liste au lieu de l'écraser
                                     st.session_state.draft_cards.extend(new_batch)
-                                    st.success(f"{len(new_batch)} nouvelles cartes ajoutées au brouillon !")
-                                    st.rerun()  # Pour rafraîchir l'éditeur
+                                    st.success(f"{len(new_batch)} nouvelles cartes !")
+                                    st.rerun()
                                 else:
-                                    st.warning("L'IA n'a rien trouvé de nouveau à ajouter.")
+                                    st.warning("Rien généré de pertinent.")
                         except Exception as e:
                             st.error(f"Erreur IA: {e}")
 
-                # --- ÉDITEUR BROUILLON (Suppression Possible) ---
+                # 4. Éditeur de Brouillon (Suppression activée)
                 if st.session_state.draft_cards:
                     st.divider()
                     st.subheader("📝 Brouillon")
-                    st.caption(
-                        "Instructions : Cochez les cases à gauche et appuyez sur 'Suppr' (ou l'icône poubelle) pour retirer les mauvaises cartes avant de valider.")
+                    st.caption("Cochez et appuyez sur 'Suppr' (ou l'icône poubelle) pour retirer une ligne.")
 
                     draft_df = pd.DataFrame(st.session_state.draft_cards)
 
-                    # On utilise data_editor avec num_rows="dynamic" pour permettre la suppression
+                    # Tableau éditable avec suppression de lignes (num_rows="dynamic")
                     edited_draft = st.data_editor(
                         draft_df[['question', 'answer', 'tags']],
                         num_rows="dynamic",
@@ -372,16 +389,11 @@ if df_base is not None:
 
                     col_save, col_clear = st.columns(2)
 
-                    if col_save.button("💾 Valider tout", type="primary"):
+                    if col_save.button("💾 Valider & Sauvegarder", type="primary"):
                         try:
-                            # IMPORTANT : On doit récupérer les données éditées (qui peuvent avoir moins de lignes)
-                            # et reconstruire les métadonnées (RID, System, etc.)
+                            # Reconstitution des données complètes à partir de l'édité
                             final_rows_to_save = []
-
-                            # edited_draft ne contient que q, a, t. Il faut remettre les infos contextuelles.
-                            # On suppose que toutes les cartes du brouillon concernent l'article courant.
                             for idx, r in edited_draft.iterrows():
-                                # On prend les métadonnées de la première carte du batch original (ou current_row)
                                 final_rows_to_save.append([
                                     str(current_row['rid']),
                                     current_row['title'],
@@ -396,7 +408,7 @@ if df_base is not None:
                                 _, ws_cards = load_cards_data(sh_obj)
                                 ws_cards.append_rows(final_rows_to_save)
 
-                                # Update statut
+                                # Marquer l'article comme "Flashcards faites"
                                 cell = worksheet.find(str(current_row['rid']))
                                 headers = worksheet.row_values(1)
                                 if 'flashcards_made' in headers:
@@ -411,9 +423,9 @@ if df_base is not None:
                                 time.sleep(1)
                                 st.rerun()
                         except Exception as e:
-                            st.error(f"Erreur: {e}")
+                            st.error(f"Erreur sauvegarde: {e}")
 
-                    if col_clear.button("🗑️ Vider le brouillon"):
+                    if col_clear.button("🗑️ Tout effacer"):
                         st.session_state.draft_cards = []
                         st.rerun()
 
