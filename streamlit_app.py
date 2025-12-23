@@ -40,11 +40,6 @@ def load_data(client, sheet_url):
         return None, None
 
 
-# --- VARIABLES DE SESSION ---
-# On utilise session_state pour se souvenir de quel article est ouvert
-if "selected_url" not in st.session_state:
-    st.session_state.selected_url = None
-
 # --- DÉBUT APP ---
 st.title("🩻 Radio Études")
 
@@ -74,10 +69,48 @@ if df is not None:
     df['flashcards_made'] = df['flashcards_made'].apply(
         lambda x: True if str(x).lower() in ['oui', 'true', '1'] else False)
 
-    # ASTUCE : On ajoute une colonne temporaire "Voir" juste pour l'interface
-    # Elle n'existe pas dans Google Sheet, on la crée à la volée
+    # Création de la colonne "Voir" si elle n'existe pas (initialisée à False partout)
     if 'Voir' not in df.columns:
-        df.insert(0, 'Voir', False)
+        df['Voir'] = False
+
+    # --- LOGIQUE DE SÉLECTION UNIQUE (Le correctif est ici) ---
+    # On vérifie si l'utilisateur a cliqué sur quelque chose dans le tableau
+    if "editor" in st.session_state:
+        changes = st.session_state["editor"]["edited_rows"]
+
+        # On cherche s'il y a un clic sur "Voir"
+        clicked_index = None
+        for idx, change in changes.items():
+            if "Voir" in change and change["Voir"] == True:
+                clicked_index = int(idx)
+                break  # On prend le premier qu'on trouve et on arrête
+
+        # Si on a trouvé un clic sur "Voir"
+        if clicked_index is not None:
+            # 1. On détermine quelle ligne RÉELLE (dans le DF global) correspond à la ligne affichée
+            # Il faut refaire le filtrage pour avoir les bons index
+            # (Note: c'est une petite répétition nécessaire pour la précision)
+            search_temp = st.session_state.get("search_key", "")
+            if search_temp:
+                temp_filtered = df[
+                    df['title'].str.contains(search_temp, case=False, na=False) |
+                    df['system'].str.contains(search_temp, case=False, na=False)
+                    ]
+            else:
+                temp_filtered = df.head(50)
+
+            # On chope l'index réel
+            real_index = temp_filtered.index[clicked_index]
+
+            # 2. On remet TOUT le monde à False
+            st.session_state.df['Voir'] = False
+
+            # 3. On met juste la ligne cliquée à True
+            st.session_state.df.at[real_index, 'Voir'] = True
+
+            # 4. On force le rechargement immédiat pour mettre à jour l'affichage
+            # (Cela va "décocher" visuellement les autres cases)
+            st.rerun()
 
     # --- LAYOUT ---
     col1, col2 = st.columns([1.3, 1])
@@ -85,7 +118,8 @@ if df is not None:
     with col1:
         st.subheader("1. Liste des articles")
 
-        search_query = st.text_input("🔍 Rechercher", "", placeholder="Titre, système...")
+        # On utilise une clé pour le champ de recherche pour s'en souvenir lors du rerun
+        search_query = st.text_input("🔍 Rechercher", "", placeholder="Titre, système...", key="search_key")
 
         if search_query:
             filtered_df = df[
@@ -95,15 +129,15 @@ if df is not None:
         else:
             filtered_df = df.head(50)
 
-        st.caption("Coche la case **👁️ Voir** pour ouvrir l'article à droite.")
+        st.caption("Coche l'œil (👁️) pour afficher. Une seule ligne active à la fois.")
 
         # --- TABLEAU INTERACTIF ---
         edited_df = st.data_editor(
             filtered_df,
             column_config={
                 "rid": None, "content": None, "remote_last_mod_date": None, "section": None,
-                "url": None,  # On cache l'URL brute
-                "Voir": st.column_config.CheckboxColumn("👁️", width="small", help="Coche pour voir"),
+                "url": None,
+                "Voir": st.column_config.CheckboxColumn("👁️", width="small"),  # Plus besoin de help text
                 "title": st.column_config.TextColumn("Titre", disabled=True),
                 "system": st.column_config.TextColumn("Système", width="small", disabled=True),
                 "read_status": st.column_config.CheckboxColumn("Lu ?", width="small"),
@@ -116,69 +150,46 @@ if df is not None:
             key="editor"
         )
 
-        # --- LOGIQUE DE DÉTECTION DES CLICS ---
-        # On regarde ce qui vient d'être modifié
-        changes = st.session_state["editor"]["edited_rows"]
-
-        # Si quelque chose a changé...
-        if changes:
-            need_save = False
-
-            for index_in_view, changes_dict in changes.items():
-                # 1. EST-CE QUE C'EST UN CLIC SUR "VOIR" ?
-                if "Voir" in changes_dict and changes_dict["Voir"] == True:
-                    # Bingo ! L'utilisateur a coché "Voir"
-                    original_row_index = filtered_df.index[index_in_view]
-                    # On met à jour l'URL à afficher
-                    st.session_state.selected_url = df.iloc[original_row_index]['url']
-
-                    # Petit hack : on décoche la case "Voir" tout de suite dans la mémoire
-                    # pour que ça agisse comme un bouton (clic -> action -> reset)
-                    # Note : Visuellement ça restera coché jusqu'au prochain rechargement complet, mais ce n'est pas grave
-
-                # 2. EST-CE QUE C'EST UNE SAUVEGARDE (Lu / Flashcard / Notes) ?
-                if any(k in changes_dict for k in ['read_status', 'flashcards_made', 'notes']):
-                    need_save = True
-
-            # Si c'était une modif de données (pas juste le bouton voir), on sauvegarde
-            if need_save:
-                # Bouton de sauvegarde explicite pour éviter de trop écrire dans Google Sheets
-                st.info("⚠️ Tu as modifié des statuts. N'oublie pas de cliquer sur Enregistrer ci-dessous.")
-
         st.write("---")
         if st.button("💾 Enregistrer les statuts", type="primary"):
             with st.spinner("Sauvegarde..."):
                 try:
-                    headers = worksheet.row_values(1)
-                    # On repasse sur tous les changements
-                    for index_in_view, changes_dict in changes.items():
-                        # On ignore la colonne "Voir" car on ne la sauvegarde pas dans Google Sheet
-                        if "Voir" in changes_dict:
-                            continue
+                    # On récupère les changements depuis le widget
+                    changes = st.session_state["editor"]["edited_rows"]
 
-                        if not changes_dict: continue
+                    if changes:
+                        headers = worksheet.row_values(1)
+                        for index_in_view, changes_dict in changes.items():
+                            # On ignore la colonne Voir pour la sauvegarde Google Sheet
+                            if "Voir" in changes_dict:
+                                del changes_dict["Voir"]
 
-                        original_row_index = filtered_df.index[index_in_view]
-                        real_rid = df.iloc[original_row_index]['rid']
+                            if not changes_dict: continue
 
-                        cell = worksheet.find(str(real_rid))
-                        row_number = cell.row
+                            original_row_index = filtered_df.index[index_in_view]
+                            real_rid = df.iloc[original_row_index]['rid']
 
-                        for col_name, new_value in changes_dict.items():
-                            if col_name in ['read_status', 'flashcards_made']:
-                                val_to_write = "Oui" if new_value else ""
-                            else:
-                                val_to_write = new_value
+                            cell = worksheet.find(str(real_rid))
+                            row_number = cell.row
 
-                            col_index = headers.index(col_name) + 1
-                            worksheet.update_cell(row_number, col_index, val_to_write)
+                            for col_name, new_value in changes_dict.items():
+                                if col_name in ['read_status', 'flashcards_made']:
+                                    val_to_write = "Oui" if new_value else ""
+                                else:
+                                    val_to_write = new_value
 
-                        col_access = headers.index('last_access') + 1
-                        worksheet.update_cell(row_number, col_access, str(datetime.now()))
+                                col_index = headers.index(col_name) + 1
+                                worksheet.update_cell(row_number, col_index, val_to_write)
 
-                    st.success("Sauvegardé !")
-                    del st.session_state.df
-                    st.rerun()  # On recharge pour rafraîchir le tableau
+                            col_access = headers.index('last_access') + 1
+                            worksheet.update_cell(row_number, col_access, str(datetime.now()))
+
+                        st.success("Sauvegardé !")
+                        del st.session_state.df  # On vide le cache pour forcer un rechargement propre
+                        st.rerun()
+                    else:
+                        st.info("Aucun changement de statut à enregistrer.")
+
                 except Exception as e:
                     st.error(f"Erreur : {e}")
 
@@ -186,11 +197,14 @@ if df is not None:
     with col2:
         st.subheader("📖 Lecture")
 
-        url_to_show = st.session_state.selected_url
+        # On cherche quelle ligne a "Voir" = True dans le DataFrame global
+        selected_rows = df[df['Voir'] == True]
 
-        if url_to_show:
+        if not selected_rows.empty:
+            # On prend la première (et théoriquement unique) ligne sélectionnée
+            url_to_show = selected_rows.iloc[0]['url']
+
             try:
-                # On affiche l'iframe
                 components.iframe(url_to_show, height=800, scrolling=True)
                 st.caption(f"Lien : [Ouvrir sur Radiopaedia]({url_to_show})")
             except Exception:
