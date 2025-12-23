@@ -5,37 +5,37 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime, date
 import streamlit.components.v1 as components
 import google.generativeai as genai
-import re
 import io
+import re
 import time
 
-# ==========================================
-# 1. CONFIGURATION
-# ==========================================
+# --- CONFIGURATION ---
 st.set_page_config(page_title="Radiopaedia Cockpit", page_icon="🩻", layout="wide")
 
+# CSS Custom
 st.markdown("""
     <style>
         .block-container {padding-top: 1rem; padding-bottom: 3rem;}
         div[data-testid="stExpander"] div[role="button"] p {font-weight: 600;}
         .stButton button {width: 100%;}
         h1 {font-size: 1.8rem !important;}
-        h2 {font-size: 1.5rem !important;}
-        .stDataEditor {border: 1px solid #ddd; border-radius: 5px;}
+        .stDataEditor {border: 1px solid #ddd;}
     </style>
 """, unsafe_allow_html=True)
 
 
-# ==========================================
-# 2. FONCTIONS BACKEND
-# ==========================================
+# --- BACKEND SHEETS ---
 @st.cache_resource
 def get_google_sheet_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds_dict = st.secrets["gcp_service_account"]
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    client = gspread.authorize(creds)
-    return client
+    try:
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(creds)
+        return client
+    except Exception as e:
+        st.error(f"Secret Error: {e}")
+        return None
 
 
 def load_data(client, sheet_url):
@@ -46,7 +46,7 @@ def load_data(client, sheet_url):
         df = pd.DataFrame(data)
         return df, worksheet, sh
     except Exception as e:
-        st.error(f"Erreur connexion Sheet : {e}")
+        st.error(f"Sheet Load Error: {e}")
         return None, None, None
 
 
@@ -55,9 +55,14 @@ def load_cards_data(sh):
         worksheet_cards = sh.worksheet("Cards")
         data = worksheet_cards.get_all_records()
         df_cards = pd.DataFrame(data)
+        columns = ['rid', 'article_title', 'system', 'card_type', 'question', 'answer', 'tags']
         if df_cards.empty:
-            df_cards = pd.DataFrame(
-                columns=['rid', 'article_title', 'system', 'card_type', 'question', 'answer', 'tags'])
+            df_cards = pd.DataFrame(columns=columns)
+        else:
+            # Ensure all columns exist
+            for col in columns:
+                if col not in df_cards.columns:
+                    df_cards[col] = ""
         return df_cards, worksheet_cards
     except:
         return pd.DataFrame(), None
@@ -70,85 +75,50 @@ def get_unique_tags(df, column_name):
     return sorted(list(set(tags)))
 
 
-# ==========================================
-# 3. STATE
-# ==========================================
+# --- STATE ---
 if "current_rid" not in st.session_state: st.session_state.current_rid = None
-if "current_url" not in st.session_state: st.session_state.current_url = None
 if "draft_cards" not in st.session_state: st.session_state.draft_cards = []
 if "api_key" not in st.session_state: st.session_state.api_key = ""
 if "selected_model" not in st.session_state: st.session_state.selected_model = ""
 
-# ==========================================
-# 4. SIDEBAR : DIAGNOSTIC & MODÈLES
-# ==========================================
+# --- SIDEBAR (DYNAMIC MODEL FETCHING) ---
 with st.sidebar:
-    st.header("⚙️ Config IA")
+    st.header("⚙️ AI Config")
 
-    # 1. API KEY
+    # 1. API Key Handling
     if "GEMINI_API_KEY" in st.secrets:
         st.session_state.api_key = st.secrets["GEMINI_API_KEY"]
-        st.success("🔑 Clé API chargée")
     else:
-        api_input = st.text_input("Clé Gemini", value=st.session_state.api_key, type="password")
-        if api_input: st.session_state.api_key = api_input
+        st.session_state.api_key = st.text_input("Gemini API Key", type="password")
 
-    st.divider()
-
-    # 2. RECUPERATION DYNAMIQUE STRICTE
-    real_models = []
-
+    # 2. Dynamic Model Listing using Official Library
+    model_options = []
     if st.session_state.api_key:
         try:
             genai.configure(api_key=st.session_state.api_key)
-
-            # On demande TOUT
-            all_list = list(genai.list_models())
-
-            # On filtre uniquement sur la capacité
-            for m in all_list:
+            # List models directly from Google
+            all_models = genai.list_models()
+            for m in all_models:
+                # Filter for models that support content generation
                 if 'generateContent' in m.supported_generation_methods:
-                    real_models.append(m.name)
+                    # Clean the name (remove 'models/' prefix if present for display, though library handles it)
+                    model_options.append(m.name)
 
-            real_models.sort()  # Tri alphabétique pour la lisibilité
-
+            model_options.sort(reverse=True)  # Usually puts newer versions at top
         except Exception as e:
-            st.error(f"Erreur API : {e}")
+            st.error(f"Error fetching models: {e}")
 
-    # 3. AFFICHAGE SELECTEUR
-    if real_models:
-        st.session_state.selected_model = st.selectbox("Choisir le modèle :", real_models)
-        st.caption(f"✅ {len(real_models)} modèles trouvés.")
+    if model_options:
+        st.session_state.selected_model = st.selectbox("Select Model", model_options)
+    elif st.session_state.api_key:
+        st.warning("No models found. Check API Key permissions.")
     else:
-        st.error("⚠️ Aucun modèle trouvé.")
-        st.info("Clique sur 'Diagnostic' ci-dessous pour comprendre pourquoi.")
+        st.info("Enter API Key to load models.")
 
-    # 4. ZONE DE DIAGNOSTIC BRUT
-    with st.expander("🔴 DIAGNOSTIC API (Clique ici)"):
-        if st.button("Lancer le test de connexion"):
-            if not st.session_state.api_key:
-                st.error("Pas de clé API.")
-            else:
-                try:
-                    genai.configure(api_key=st.session_state.api_key)
-                    raw_list = list(genai.list_models())
-                    st.write("Réponse brute de Google :")
-                    found_any = False
-                    for m in raw_list:
-                        st.text(f"- {m.name}\n  Methodes: {m.supported_generation_methods}")
-                        found_any = True
-
-                    if not found_any:
-                        st.warning(
-                            "La connexion fonctionne mais la liste est vide. Vérifie que l'API 'Generative AI' est activée dans ta console Google Cloud.")
-                except Exception as e:
-                    st.error(f"Erreur fatale : {e}")
-
-    st.divider()
-
-    # Export
+    # Export Anki
     if "sh_obj" in st.session_state and st.session_state.sh_obj:
-        if st.button("📥 Export Anki"):
+        st.divider()
+        if st.button("📥 Export Anki (.txt)"):
             df_c, _ = load_cards_data(st.session_state.sh_obj)
             if not df_c.empty:
                 out = io.StringIO()
@@ -158,54 +128,52 @@ with st.sidebar:
                     a = str(r['answer']).replace('|', '/')
                     tag = str(r.get('tags', '')).strip() or str(r['article_title']).replace(' ', '_')
                     out.write(f"{q}|{a}|{r['card_type']}|{tag}\n")
-                st.download_button("Sauvegarder .txt", data=out.getvalue(), file_name=f"anki_{date.today()}.txt")
+                st.download_button("Download .txt", data=out.getvalue(), file_name=f"anki_{date.today()}.txt")
 
-# ==========================================
-# 5. CHARGEMENT DONNÉES
-# ==========================================
+# --- MAIN APP ---
 try:
     sheet_url = st.secrets["private_sheet_url"]
 except:
-    st.error("Secrets manquants.")
+    st.warning("Missing 'private_sheet_url' in st.secrets")
     st.stop()
 
-if "client" not in st.session_state:
-    st.session_state.client = get_google_sheet_client()
+if "client" not in st.session_state: st.session_state.client = get_google_sheet_client()
 
-if "df" not in st.session_state:
-    df_load, worksheet, sh_obj = load_data(st.session_state.client, sheet_url)
-    if df_load is not None:
-        for c in ['read_status', 'flashcards_made', 'ignored']:
-            if c not in df_load.columns:
-                df_load[c] = False
-            else:
-                df_load[c] = df_load[c].apply(lambda x: True if str(x).lower() in ['oui', 'true', '1'] else False)
-    st.session_state.df = df_load
-    st.session_state.worksheet = worksheet
-    st.session_state.sh_obj = sh_obj
+if st.session_state.client:
+    if "df" not in st.session_state:
+        df_load, worksheet, sh_obj = load_data(st.session_state.client, sheet_url)
+        if df_load is not None:
+            for c in ['read_status', 'flashcards_made', 'ignored']:
+                if c not in df_load.columns:
+                    df_load[c] = False
+                else:
+                    df_load[c] = df_load[c].apply(lambda x: True if str(x).lower() in ['oui', 'true', '1'] else False)
+        st.session_state.df = df_load
+        st.session_state.worksheet = worksheet
+        st.session_state.sh_obj = sh_obj
+    else:
+        if st.session_state.worksheet is None:
+            _, st.session_state.worksheet, st.session_state.sh_obj = load_data(st.session_state.client, sheet_url)
+
+    df_base = st.session_state.df
+    worksheet = st.session_state.worksheet
+    sh_obj = st.session_state.sh_obj
 else:
-    if st.session_state.worksheet is None:
-        _, st.session_state.worksheet, st.session_state.sh_obj = load_data(st.session_state.client, sheet_url)
+    st.stop()
 
-df_base = st.session_state.df
-worksheet = st.session_state.worksheet
-sh_obj = st.session_state.sh_obj
-
-# ==========================================
-# 6. INTERFACE
-# ==========================================
-st.title("🩻 Radiologie Cockpit")
+# UI Cockpit
+st.title("🩻 Radiopaedia Cockpit")
 
 if df_base is not None:
-    # --- TRACKER ---
-    with st.expander("🔍 Liste des articles", expanded=False):
+    # Tracker
+    with st.expander("🔍 Articles List", expanded=False):
         c1, c2, c3, c4 = st.columns(4)
-        view_mode = c1.radio("Vue", ["📥 À faire", "✅ Fait", "📂 Tout"], horizontal=True)
+        view_mode = c1.radio("View", ["📥 To Do", "✅ Done", "📂 All"], horizontal=True)
         u_sys = get_unique_tags(df_base, 'system')
-        sel_sys = c2.multiselect("Système", u_sys)
+        sel_sys = c2.multiselect("System", u_sys)
         u_sec = get_unique_tags(df_base, 'section')
         sel_sec = c3.multiselect("Section", u_sec)
-        s_query = c4.text_input("Recherche", "")
+        s_query = c4.text_input("Search", "")
 
     df_display = df_base.copy()
     if "Voir" in df_display.columns: df_display.drop(columns=["Voir"], inplace=True)
@@ -213,12 +181,13 @@ if df_base is not None:
 
     if st.session_state.current_rid:
         mask = df_display['rid'].astype(str) == str(st.session_state.current_rid)
-        df_display.loc[mask, 'Voir'] = True
+        if mask.any():
+            df_display.loc[mask, 'Voir'] = True
 
     df_display['ignored'] = df_display['ignored'].fillna(False).astype(bool)
-    if view_mode == "📥 À faire":
-        df_display = df_display[~df_display['ignored']]
-    elif view_mode == "✅ Fait":
+    if view_mode == "📥 To Do":
+        df_display = df_display[~df_display['ignored'] & ~df_display['read_status']]
+    elif view_mode == "✅ Done":
         df_display = df_display[(df_display['read_status']) & (df_display['flashcards_made'])]
 
     if sel_sys:
@@ -233,21 +202,13 @@ if df_base is not None:
     if len(df_display) > 100: df_display = df_display.head(100)
 
     edited_df = st.data_editor(
-        df_display,
-        height=250,
+        df_display, height=250, hide_index=True, use_container_width=True, key="editor",
         column_config={
-            "rid": None, "content": None, "remote_last_mod_date": None, "url": None,
+            "rid": None, "content": None, "remote_last_mod_date": None, "url": None, "section": None,
             "Voir": st.column_config.CheckboxColumn("👁️", width="small"),
-            "title": st.column_config.TextColumn("Titre", disabled=True),
-            "system": st.column_config.TextColumn("Système", width="small", disabled=True),
-            "section": None,
-            "ignored": st.column_config.CheckboxColumn("⛔", width="small"),
-            "read_status": st.column_config.CheckboxColumn("Lu ?", width="small"),
-            "flashcards_made": st.column_config.CheckboxColumn("Flash ?", width="small"),
-            "notes": st.column_config.TextColumn("Notes", width="medium"),
-            "last_access": st.column_config.TextColumn("Dernier", disabled=True)
-        },
-        hide_index=True, use_container_width=True, key="editor"
+            "title": st.column_config.TextColumn("Title", disabled=True),
+            "system": st.column_config.TextColumn("System", width="small", disabled=True),
+        }
     )
 
     changes = st.session_state["editor"]["edited_rows"]
@@ -255,186 +216,170 @@ if df_base is not None:
         need_rerun = False
         for idx_view, chg in changes.items():
             if "Voir" in chg and chg["Voir"]:
-                orig_idx = df_display.index[idx_view]
-                row = df_base.iloc[orig_idx]
-                st.session_state.current_rid = str(row['rid'])
-                st.session_state.current_url = row['url']
-                need_rerun = True
+                try:
+                    orig_idx = df_display.index[idx_view]
+                    st.session_state.current_rid = str(df_base.loc[orig_idx, 'rid'])
+                    need_rerun = True
+                except:
+                    pass
 
             data_chg = {k: v for k, v in chg.items() if k != "Voir"}
             if data_chg:
                 try:
                     orig_idx = df_display.index[idx_view]
-                    real_rid = df_base.iloc[orig_idx]['rid']
+                    real_rid = df_base.loc[orig_idx, 'rid']
                     cell = worksheet.find(str(real_rid))
-                    row_n = cell.row
                     headers = worksheet.row_values(1)
                     for k, v in data_chg.items():
-                        val = "Oui" if v is True else ("" if v is False else v)
+                        val = "TRUE" if v is True else ("FALSE" if v is False else v)
                         if k in headers:
-                            worksheet.update_cell(row_n, headers.index(k) + 1, val)
+                            col_idx = headers.index(k) + 1
+                            worksheet.update_cell(cell.row, col_idx, val)
                             st.session_state.df.at[orig_idx, k] = v
-                    worksheet.update_cell(row_n, headers.index('last_access') + 1, str(datetime.now()))
-                    st.toast("Sauvegardé", icon="✅")
+                    if 'last_access' in headers:
+                        worksheet.update_cell(cell.row, headers.index('last_access') + 1, str(datetime.now()))
+                    st.toast("Saved", icon="✅")
                     need_rerun = True
                 except Exception as e:
-                    st.error(f"Erreur save: {e}")
+                    st.error(f"Save Error: {e}")
+
         if need_rerun: st.rerun()
 
-    # --- ESPACE DE TRAVAIL ---
+    # Workspace
     if st.session_state.current_rid:
-        current_row = df_base[df_base['rid'].astype(str) == str(st.session_state.current_rid)].iloc[0]
+        current_row_mask = df_base['rid'].astype(str) == str(st.session_state.current_rid)
+        if current_row_mask.any():
+            current_row = df_base[current_row_mask].iloc[0]
 
-        st.markdown("---")
-        col_left, col_right = st.columns([1, 1])
+            st.markdown("---")
+            c_left, c_right = st.columns([1, 1])
 
-        # 1. LECTURE
-        with col_left:
-            st.subheader(f"📖 {current_row['title']}")
-            if current_row['url']:
-                try:
+            with c_left:
+                st.subheader(f"📖 {current_row['title']}")
+                if current_row['url']:
                     components.iframe(current_row['url'], height=850, scrolling=True)
-                except:
-                    st.markdown(f"[Ouvrir lien]({current_row['url']})")
-
-        # 2. IA ARCHITECT
-        with col_right:
-            st.subheader("🧠 Générateur")
-
-            existing_cards_context = ""
-            count_existing = 0
-            if sh_obj:
-                df_c, _ = load_cards_data(sh_obj)
-                if not df_c.empty:
-                    existing_for_article = df_c[df_c['rid'].astype(str) == str(current_row['rid'])]
-                    count_existing = len(existing_for_article)
-                    if count_existing > 0:
-                        cards_list = []
-                        for _, c_row in existing_for_article.iterrows():
-                            cards_list.append(f"- Q: {c_row['question']} | A: {c_row['answer']}")
-                        existing_cards_context = "\n".join(cards_list)
-
-            if count_existing > 0:
-                st.caption(f"ℹ️ {count_existing} cartes existantes.")
-
-            mode = st.radio("Format", ["Format A: Cloze (Trous)", "Format B: Liste Différentiel"], horizontal=True)
-            custom_inst = st.text_input("Instruction spécifique")
-
-            if st.button("✨ Générer", type="primary"):
-                if not st.session_state.api_key:
-                    st.error("Manque clé API")
-                elif not st.session_state.selected_model:
-                    st.error("Aucun modèle sélectionné. Vérifie le diagnostic.")
                 else:
-                    try:
-                        genai.configure(api_key=st.session_state.api_key)
-                        model = genai.GenerativeModel(
-                            st.session_state.selected_model)  # Pas de safety settings pour éviter conflit param
+                    st.warning("No URL available")
 
-                        memory_block = ""
-                        if existing_cards_context:
-                            memory_block = f"EXISTING CARDS:\n{existing_cards_context}"
+            with c_right:
+                st.subheader("🧠 Generator")
 
-                        sys_prompt = """
-                        System Prompt: Radiology Board Exam Anki Architect v2.3
-                        Role: Elite Medical Editor.
-                        CRITICAL RULE: "STAND-ALONE" TEST.
-                        - Never start with "It", "They".
-                        - Always name the pathology explicitly in the question.
+                existing_ctx = ""
+                if sh_obj:
+                    df_c, _ = load_cards_data(sh_obj)
+                    if not df_c.empty:
+                        exist = df_c[df_c['rid'].astype(str) == str(current_row['rid'])]
+                        if not exist.empty:
+                            st.caption(f"ℹ️ {len(exist)} existing cards.")
+                            existing_ctx = "\n".join(
+                                [f"- Q: {r['question']} | A: {r['answer']}" for _, r in exist.iterrows()])
 
-                        OUTPUT FORMAT:
-                        - Pipe Separator (|).
-                        - Question/Cloze | Extra/Answer | Tag
-                        """
+                mode = st.radio("Format", ["Cloze", "List"], horizontal=True)
+                instr = st.text_input("Instructions", placeholder="Ex: Focus on MRI findings...")
 
-                        full_prompt = f"{sys_prompt}\n{memory_block}\nArticle: {current_row['title']}\nFormat: {mode}\nInstr: {custom_inst}\nText:\n{current_row['content']}"
+                if st.button("✨ Generate Cards", type="primary"):
+                    if not st.session_state.api_key or not st.session_state.selected_model:
+                        st.error("Check AI Config (Sidebar)")
+                    else:
+                        try:
+                            with st.spinner(f"Generating with {st.session_state.selected_model}..."):
+                                genai.configure(api_key=st.session_state.api_key)
+                                model = genai.GenerativeModel(st.session_state.selected_model)
 
-                        with st.spinner(f"Génération ({st.session_state.selected_model})..."):
-                            resp = model.generate_content(full_prompt)
-                            clean = resp.text.replace("```", "").strip()
-                            new_batch = []
-                            for l in clean.split('\n'):
-                                if '|' in l:
-                                    p = l.split('|')
-                                    if len(p) >= 2:
-                                        q = p[0].strip()
-                                        if len(q) > 5 and "Question" not in q:
-                                            new_batch.append({
+                                # Prompt in English
+                                mem = f"DO NOT generate these questions again (already done):\n{existing_ctx}" if existing_ctx else ""
+                                sys = """Role: Elite Medical Editor for Radiopaedia. 
+                                Goal: Create Anki flashcards.
+                                Rules:
+                                1. STRICTLY Stand-Alone cards: Never use 'It', 'They', 'The lesion'. Always name the pathology/sign in the question.
+                                2. Format: Question|Answer|Tag
+                                3. Separator is purely pipe (|). No Markdown tables.
+                                4. Language: English."""
+
+                                prompt = f"{sys}\n{mem}\n\nTask:\nArticle Title: {current_row['title']}\nFormat Mode: {mode}\nUser Instruction: {instr}\n\nSource Content:\n{current_row['content']}"
+
+                                resp = model.generate_content(prompt)
+
+                                clean = resp.text.replace("```", "").strip()
+                                batch = []
+                                for l in clean.split('\n'):
+                                    if '|' in l and len(l) > 5:
+                                        p = l.split('|')
+                                        if len(p) >= 2:
+                                            batch.append({
                                                 "rid": str(current_row['rid']),
                                                 "article_title": current_row['title'],
                                                 "system": current_row['system'],
-                                                "card_type": "Cloze" if "{{" in q else "Basic",
-                                                "question": q,
+                                                "card_type": mode,
+                                                "question": p[0].strip(),
                                                 "answer": p[1].strip(),
                                                 "tags": p[2].strip() if len(p) > 2 else ""
                                             })
 
-                            if new_batch:
-                                st.session_state.draft_cards.extend(new_batch)
-                                st.success(f"{len(new_batch)} nouvelles cartes !")
-                            else:
-                                st.warning("Rien généré.")
-                                st.code(clean)
+                                if batch:
+                                    st.session_state.draft_cards.extend(batch)
+                                    st.success(f"{len(batch)} cards generated!")
+                                    st.rerun()
+                                else:
+                                    st.warning("AI generated no formatted output. Try again.")
 
-                    except Exception as e:
-                        st.error(f"ERREUR : {e}")
+                        except Exception as e:
+                            st.error(f"Gemini API Error: {e}")
 
-            # --- PREVISUALISATION ---
-            if st.session_state.draft_cards:
-                st.divider()
-                st.subheader(f"Brouillon ({len(st.session_state.draft_cards)})")
+                if st.session_state.draft_cards:
+                    st.divider()
+                    st.write("### 📝 Draft (Unsaved)")
+                    draft_df = pd.DataFrame(st.session_state.draft_cards)
 
-                draft_df = pd.DataFrame(st.session_state.draft_cards)
+                    edited_draft = st.data_editor(
+                        draft_df,
+                        num_rows="dynamic",
+                        key="draft_editor",
+                        column_config={
+                            "rid": None, "article_title": None, "system": None, "card_type": None
+                        }
+                    )
 
-                edited_draft = st.data_editor(
-                    draft_df[['question', 'answer', 'tags']],
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    key="draft_editor"
-                )
+                    c_save, c_clear = st.columns(2)
+                    with c_save:
+                        if st.button("💾 Save to Sheets", type="primary"):
+                            try:
+                                if sh_obj:
+                                    ws_cards = sh_obj.worksheet("Cards")
+                                    # We need to ensure we grab all columns including hidden ones from the session state
+                                    # But simplistic approach: reconstruct from edited view + hidden defaults
+                                    # Better approach: Iterate over edited_draft and fill missing info from session_state if needed
+                                    # Since user only edits Q/A/Tags, the rest (rid/title) is constant for the batch usually.
 
-                col_save, col_clear = st.columns(2)
+                                    # Taking edited_draft directly as it has the same structure as draft_df
+                                    # Ensure order matches Sheet
+                                    save_df = edited_draft[
+                                        ['rid', 'article_title', 'system', 'card_type', 'question', 'answer', 'tags']]
+                                    rows_to_add = save_df.values.tolist()
 
-                if col_save.button("💾 Valider & Marquer Fait", type="primary"):
-                    try:
-                        _, ws_cards = load_cards_data(sh_obj)
-                        if ws_cards:
-                            rows = []
-                            for _, r in edited_draft.iterrows():
-                                rows.append([
-                                    str(current_row['rid']),
-                                    current_row['title'],
-                                    current_row['system'],
-                                    "Cloze" if "{{" in r['question'] else "Basic",
-                                    r['question'],
-                                    r['answer'],
-                                    r['tags']
-                                ])
+                                    if rows_to_add:
+                                        ws_cards.append_rows(rows_to_add)
 
-                            if rows:
-                                ws_cards.append_rows(rows)
+                                        try:
+                                            cell = worksheet.find(str(current_row['rid']))
+                                            headers = worksheet.row_values(1)
+                                            if 'flashcards_made' in headers:
+                                                worksheet.update_cell(cell.row, headers.index('flashcards_made') + 1,
+                                                                      "TRUE")
+                                                idx = \
+                                                df_base[df_base['rid'].astype(str) == str(current_row['rid'])].index[0]
+                                                st.session_state.df.at[idx, 'flashcards_made'] = True
+                                        except:
+                                            pass
 
-                                cell = worksheet.find(str(current_row['rid']))
-                                headers = worksheet.row_values(1)
-                                if 'flashcards_made' in headers:
-                                    worksheet.update_cell(cell.row, headers.index('flashcards_made') + 1, "Oui")
-                                    idx_local = \
-                                    df_base.index[df_base['rid'].astype(str) == str(current_row['rid'])].tolist()[0]
-                                    st.session_state.df.at[idx_local, 'flashcards_made'] = True
+                                        st.session_state.draft_cards = []
+                                        st.toast("Cards Saved!", icon="🎉")
+                                        time.sleep(1)
+                                        st.rerun()
+                            except Exception as e:
+                                st.error(f"Save Error: {e}")
 
-                                st.session_state.draft_cards = []
-                                st.balloons()
-                                st.toast("Sauvegardé !", icon="🎉")
-                                time.sleep(1)
-                                st.rerun()
-                            else:
-                                st.warning("Le tableau est vide.")
-                    except Exception as e:
-                        st.error(f"Erreur: {e}")
-
-                if col_clear.button("🗑️ Tout vider"):
-                    st.session_state.draft_cards = []
-                    st.rerun()
-
-    else:
-        st.info("👈 Sélectionne un article (👁️) pour commencer.")
+                    with c_clear:
+                        if st.button("🗑️ Clear Draft"):
+                            st.session_state.draft_cards = []
+                            st.rerun()
