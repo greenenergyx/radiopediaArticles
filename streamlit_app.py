@@ -59,7 +59,6 @@ def load_cards_data(sh):
         if df_cards.empty:
             df_cards = pd.DataFrame(columns=columns)
         else:
-            # Ensure all columns exist
             for col in columns:
                 if col not in df_cards.columns:
                     df_cards[col] = ""
@@ -81,39 +80,45 @@ if "draft_cards" not in st.session_state: st.session_state.draft_cards = []
 if "api_key" not in st.session_state: st.session_state.api_key = ""
 if "selected_model" not in st.session_state: st.session_state.selected_model = ""
 
-# --- SIDEBAR (DYNAMIC MODEL FETCHING) ---
+# --- SIDEBAR (CODE MODIFIÉ "INCASSABLE") ---
 with st.sidebar:
     st.header("⚙️ AI Config")
 
-    # 1. API Key Handling
+    # 1. API Key
     if "GEMINI_API_KEY" in st.secrets:
         st.session_state.api_key = st.secrets["GEMINI_API_KEY"]
     else:
-        st.session_state.api_key = st.text_input("Gemini API Key", type="password")
+        # Fallback pour test manuel si pas dans les secrets
+        st.session_state.api_key = st.text_input("Gemini API Key", value="", type="password")
 
-    # 2. Dynamic Model Listing using Official Library
+    # 2. Model Selection (HYBRIDE : Dynamique + Fallback)
     model_options = []
+
+    # Tentative de listing officiel
     if st.session_state.api_key:
         try:
             genai.configure(api_key=st.session_state.api_key)
-            # List models directly from Google
             all_models = genai.list_models()
             for m in all_models:
-                # Filter for models that support content generation
                 if 'generateContent' in m.supported_generation_methods:
-                    # Clean the name (remove 'models/' prefix if present for display, though library handles it)
                     model_options.append(m.name)
+            model_options.sort(reverse=True)
+        except Exception:
+            # Si l'API échoue à lister (erreur 403/404), on ne plante pas.
+            pass
 
-            model_options.sort(reverse=True)  # Usually puts newer versions at top
-        except Exception as e:
-            st.error(f"Error fetching models: {e}")
+    # C'EST ICI QUE JE RÈGLE TON PROBLÈME :
+    # Si la liste est vide (échec API), on force les noms connus manuellement.
+    if not model_options:
+        model_options = [
+            "models/gemini-1.5-flash",
+            "models/gemini-1.5-pro",
+            "models/gemini-1.0-pro",
+            "gemini-pro"
+        ]
+        st.caption("⚠️ Mode manuel (API listing failed)")
 
-    if model_options:
-        st.session_state.selected_model = st.selectbox("Select Model", model_options)
-    elif st.session_state.api_key:
-        st.warning("No models found. Check API Key permissions.")
-    else:
-        st.info("Enter API Key to load models.")
+    st.session_state.selected_model = st.selectbox("Select Model", model_options)
 
     # Export Anki
     if "sh_obj" in st.session_state and st.session_state.sh_obj:
@@ -278,8 +283,8 @@ if df_base is not None:
                 instr = st.text_input("Instructions", placeholder="Ex: Focus on MRI findings...")
 
                 if st.button("✨ Generate Cards", type="primary"):
-                    if not st.session_state.api_key or not st.session_state.selected_model:
-                        st.error("Check AI Config (Sidebar)")
+                    if not st.session_state.api_key:
+                        st.error("No API Key found.")
                     else:
                         try:
                             with st.spinner(f"Generating with {st.session_state.selected_model}..."):
@@ -346,13 +351,6 @@ if df_base is not None:
                             try:
                                 if sh_obj:
                                     ws_cards = sh_obj.worksheet("Cards")
-                                    # We need to ensure we grab all columns including hidden ones from the session state
-                                    # But simplistic approach: reconstruct from edited view + hidden defaults
-                                    # Better approach: Iterate over edited_draft and fill missing info from session_state if needed
-                                    # Since user only edits Q/A/Tags, the rest (rid/title) is constant for the batch usually.
-
-                                    # Taking edited_draft directly as it has the same structure as draft_df
-                                    # Ensure order matches Sheet
                                     save_df = edited_draft[
                                         ['rid', 'article_title', 'system', 'card_type', 'question', 'answer', 'tags']]
                                     rows_to_add = save_df.values.tolist()
