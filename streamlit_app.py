@@ -74,25 +74,41 @@ def get_unique_tags(df, column_name):
 if "current_url" not in st.session_state: st.session_state.current_url = None
 if "draft_cards" not in st.session_state: st.session_state.draft_cards = []
 if "api_key" not in st.session_state: st.session_state.api_key = ""
+if "selected_model" not in st.session_state: st.session_state.selected_model = "models/gemini-pro"
 
-# --- SIDEBAR (Configuration IA) ---
+# --- SIDEBAR (Configuration IA & Modèle) ---
 with st.sidebar:
     st.title("⚙️ Configuration")
 
-    # --- GESTION AUTOMATIQUE DE LA CLÉ (NOUVEAU) ---
-    # 1. On vérifie si la clé est dans les secrets
+    # 1. Gestion de la Clé API
     if "GEMINI_API_KEY" in st.secrets:
         st.session_state.api_key = st.secrets["GEMINI_API_KEY"]
-        st.success("🔑 Clé API chargée depuis les secrets")
-
-    # 2. Si pas de secret, on demande manuellement (Fallback)
+        st.success("🔑 Clé API chargée")
     else:
         api_input = st.text_input("Clé API Google Gemini", value=st.session_state.api_key, type="password")
         if api_input: st.session_state.api_key = api_input
-        st.caption("Astuce : Ajoute GEMINI_API_KEY dans les secrets Streamlit pour ne plus la saisir.")
 
     st.divider()
-    st.write("🤖 **Paramètres IA**")
+
+    # 2. Sélecteur de Modèle Dynamique (CORRECTION DU BUG)
+    st.write("🤖 **Modèle IA**")
+    available_models = ["models/gemini-pro"]  # Valeur par défaut de secours
+
+    if st.session_state.api_key:
+        try:
+            genai.configure(api_key=st.session_state.api_key)
+            # On liste les modèles disponibles pour cette clé
+            all_models = genai.list_models()
+            found_models = [m.name for m in all_models if 'generateContent' in m.supported_generation_methods]
+            if found_models:
+                available_models = sorted(found_models, reverse=True)
+        except Exception:
+            st.caption("⚠️ Impossible de lister les modèles (Clé invalide ?)")
+
+    # Le menu déroulant pour choisir
+    st.session_state.selected_model = st.selectbox("Choisir le modèle :", available_models, index=0)
+
+    st.divider()
     default_rules = "Create concise Anki cards. Focus on radiology signs, pathology, and differential diagnosis."
     global_rules = st.text_area("Instructions Globales", value=default_rules, height=100)
 
@@ -123,7 +139,6 @@ if "df" not in st.session_state:
     st.session_state.worksheet = worksheet
     st.session_state.sh_obj = sh_obj
 else:
-    # Reconnexion si nécessaire
     if st.session_state.worksheet is None:
         _, st.session_state.worksheet, st.session_state.sh_obj = load_data(st.session_state.client, sheet_url)
 
@@ -139,7 +154,6 @@ tab1, tab2, tab3 = st.tabs(["📊 Tracker de Lecture", "🏭 Usine à Flashcards
 # ==========================================
 with tab1:
     if df_base is not None:
-        # Préparation Vue
         if "Voir" in df_base.columns: df_base.drop(columns=["Voir"], inplace=True)
         df_display = df_base.copy()
         df_display.insert(0, "Voir", False)
@@ -147,7 +161,6 @@ with tab1:
             mask = df_display['url'] == st.session_state.current_url
             df_display.loc[mask, 'Voir'] = True
 
-        # Filtres
         with st.expander("🔍 Filtres & Affichage", expanded=True):
             view_mode = st.radio("Mode :", ["📥 À traiter", "⛔ Ignorés", "📂 Tout"], horizontal=True)
             st.divider()
@@ -161,7 +174,6 @@ with tab1:
             with c_f3:
                 s_query = st.text_input("Recherche", "")
 
-        # Logique Filtrage
         df_display['ignored'] = df_display['ignored'].fillna(False).astype(bool)
         if view_mode == "📥 À traiter":
             filtered_df = df_display[~df_display['ignored']]
@@ -182,7 +194,6 @@ with tab1:
         if not sel_sys and not sel_sec and not s_query and len(filtered_df) > 200:
             filtered_df = filtered_df.head(200)
 
-        # Layout Tableau + Iframe
         col1, col2 = st.columns([1.6, 1])
         with col1:
             st.subheader(f"Articles ({len(filtered_df)})")
@@ -204,7 +215,6 @@ with tab1:
                 hide_index=True, use_container_width=True, key="editor"
             )
 
-            # Gestion Changements (Sauvegarde)
             changes = st.session_state["editor"]["edited_rows"]
             if changes:
                 need_rerun = False
@@ -253,15 +263,14 @@ with tab1:
 # TAB 2 : USINE À FLASHCARDS (IA)
 # ==========================================
 with tab2:
-    st.header("🏭 Générateur de Cartes (Gemini)")
+    st.header("🏭 Générateur de Cartes")
 
     if not st.session_state.api_key:
-        st.warning("⚠️ Clé API introuvable. Ajoute 'GEMINI_API_KEY' dans les secrets ou entre-la manuellement.")
+        st.warning("⚠️ Clé API introuvable.")
     else:
-        st.write("1️⃣ **Choisis un article source**")
-
+        st.write("1️⃣ **Article Source**")
         c_sel1, c_sel2 = st.columns([1, 2])
-        f_sys_ia = c_sel1.selectbox("Filtrer liste par Système", ["Tout"] + u_sys)
+        f_sys_ia = c_sel1.selectbox("Filtrer par Système", ["Tout"] + u_sys)
 
         candidates = df_base
         if f_sys_ia != "Tout":
@@ -276,18 +285,20 @@ with tab2:
         col_content, col_gen = st.columns(2)
 
         with col_content:
-            st.subheader(f"📄 Contenu : {row_art['title']}")
-            st.text_area("Texte de l'article (source pour l'IA)", row_art['content'], height=500, disabled=True)
+            st.subheader(f"📄 {row_art['title']}")
+            st.text_area("Texte source", row_art['content'], height=500, disabled=True)
 
         with col_gen:
-            st.subheader("🤖 Paramètres IA")
-            mode = st.radio("Type de cartes", ["Basic (Q&A)", "Cloze (Texte à trous)"], horizontal=True)
-            custom_inst = st.text_input("Instruction spécifique pour cet article")
+            st.subheader("🤖 IA")
+            st.info(f"Modèle utilisé : **{st.session_state.selected_model}**")
+            mode = st.radio("Type", ["Basic (Q&A)", "Cloze (Texte à trous)"], horizontal=True)
+            custom_inst = st.text_input("Instruction spécifique")
 
             if st.button("✨ Générer les cartes", type="primary", use_container_width=True):
                 try:
+                    # CONFIGURATION DU MODÈLE CHOISI DANS LA SIDEBAR
                     genai.configure(api_key=st.session_state.api_key)
-                    model = genai.GenerativeModel("models/gemini-1.5-flash")
+                    model = genai.GenerativeModel(st.session_state.selected_model)
 
                     prompt = f"""
                     Role: Expert Medical Tutor in Radiology.
@@ -299,7 +310,7 @@ with tab2:
                     {row_art['content']}
                     """
 
-                    with st.spinner("L'IA réfléchit..."):
+                    with st.spinner(f"Génération avec {st.session_state.selected_model}..."):
                         response = model.generate_content(prompt)
                         clean = response.text.replace("```csv", "").replace("```", "").strip()
                         new_batch = []
@@ -315,21 +326,19 @@ with tab2:
                                     "answer": parts[1].strip()
                                 })
                         st.session_state.draft_cards.extend(new_batch)
-                        st.success(f"{len(new_batch)} cartes générées ! (Voir ci-dessous)")
+                        st.success(f"{len(new_batch)} cartes générées !")
 
                 except Exception as e:
                     st.error(f"Erreur IA : {e}")
 
         if st.session_state.draft_cards:
             st.divider()
-            st.subheader(f"📝 Brouillons en attente ({len(st.session_state.draft_cards)})")
-            st.caption("Ces cartes ne sont pas encore dans Google Sheets.")
-
+            st.subheader(f"📝 Brouillons ({len(st.session_state.draft_cards)})")
             draft_df = pd.DataFrame(st.session_state.draft_cards)
             st.dataframe(draft_df[['question', 'answer']], use_container_width=True)
 
             c_save, c_del = st.columns(2)
-            if c_save.button("☁️ Valider et Envoyer dans Google Sheets", type="primary"):
+            if c_save.button("☁️ Valider et Envoyer (Sheets)", type="primary"):
                 try:
                     _, ws_cards = load_cards_data(sh_obj)
                     if ws_cards:
@@ -337,7 +346,7 @@ with tab2:
                             ['rid', 'article_title', 'system', 'card_type', 'question', 'answer']].values.tolist()
                         ws_cards.append_rows(rows_to_add)
                         st.session_state.draft_cards = []
-                        st.success("Cartes sauvegardées dans l'onglet 'Cards' !")
+                        st.success("Sauvegardé dans 'Cards' !")
                         time.sleep(1)
                         st.rerun()
                 except Exception as e:
@@ -348,12 +357,11 @@ with tab2:
                 st.rerun()
 
 # ==========================================
-# TAB 3 : BASE DE DONNÉES & EXPORT
+# TAB 3 : EXPORT
 # ==========================================
 with tab3:
-    st.header("🗃️ Mes Flashcards (Onglet 'Cards')")
-
-    if st.button("🔄 Rafraîchir la liste"):
+    st.header("🗃️ Mes Flashcards")
+    if st.button("🔄 Rafraîchir"):
         st.cache_resource.clear()
         st.rerun()
 
@@ -371,7 +379,6 @@ with tab3:
             tag = str(r['article_title']).replace(' ', '_').replace(';', '')
             out.write(f"{r['card_type']};{q};{a};{tag}\n")
 
-        st.download_button("⬇️ Télécharger pour Anki (.txt)", data=out.getvalue(),
-                           file_name=f"anki_export_{datetime.date.today()}.txt")
+        st.download_button("⬇️ Télécharger Anki", data=out.getvalue(), file_name=f"anki_{datetime.date.today()}.txt")
     else:
         st.info("Aucune carte trouvée.")
