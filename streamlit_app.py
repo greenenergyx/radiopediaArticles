@@ -13,7 +13,6 @@ st.markdown("""
     <style>
         .stDataEditor {max-height: 600px; overflow-y: auto;}
         .block-container {padding-top: 1rem; padding-bottom: 1rem;}
-        /* Petit style pour les filtres */
         div[data-testid="stExpander"] div[role="button"] p {
             font-size: 1.1rem;
             font-weight: 600;
@@ -45,14 +44,12 @@ def load_data(client, sheet_url):
         return None, None
 
 
-# --- FONCTION UTILITAIRE POUR LES TAGS ---
 def get_unique_tags(df, column_name):
-    """Récupère tous les tags individuels séparés par des virgules."""
-    # On prend toute la colonne, on la met en texte, on sépare par les virgules
+    """Récupère tous les tags uniques séparés par des virgules."""
+    if column_name not in df.columns:
+        return []
     all_text = ",".join(df[column_name].dropna().astype(str).tolist())
-    # On nettoie les espaces autour (strip) et on enlève les vides
     tags = [t.strip() for t in all_text.split(',') if t.strip()]
-    # On retourne la liste unique triée
     return sorted(list(set(tags)))
 
 
@@ -72,12 +69,23 @@ except:
 if "client" not in st.session_state:
     st.session_state.client = get_google_sheet_client()
 
-# Chargement des données brutes
+# Chargement initial
 if "df" not in st.session_state:
     df_load, worksheet = load_data(st.session_state.client, sheet_url)
+
+    # Premier nettoyage des booléens au chargement
+    if df_load is not None:
+        cols_to_bool = ['read_status', 'flashcards_made', 'ignored']
+        if 'ignored' not in df_load.columns: df_load['ignored'] = False
+
+        for col in cols_to_bool:
+            if col in df_load.columns:
+                df_load[col] = df_load[col].apply(lambda x: True if str(x).lower() in ['oui', 'true', '1'] else False)
+
     st.session_state.df = df_load
     st.session_state.worksheet = worksheet
 else:
+    # Récupération si déjà en mémoire
     if st.session_state.worksheet is None:
         _, st.session_state.worksheet = load_data(st.session_state.client, sheet_url)
 
@@ -85,31 +93,18 @@ df_base = st.session_state.df
 worksheet = st.session_state.worksheet
 
 if df_base is not None:
-    # --- NETTOYAGE DES DONNÉES ---
-    cols_to_bool = ['read_status', 'flashcards_made', 'ignored']
+    # --- PRÉPARATION DE LA VUE ---
+    # On travaille sur une copie pour l'affichage, mais on garde le lien avec df_base via l'index ou RID
 
-    # Création colonne ignored si absente
-    if 'ignored' not in df_base.columns:
-        df_base['ignored'] = False
-
-    for col in cols_to_bool:
-        df_base[col] = df_base[col].apply(lambda x: True if str(x).lower() in ['oui', 'true', '1'] else False)
-
-    # --- PRÉPARATION AFFICHAGE ---
-
-    # 1. Nettoyage préventif
+    # 1. Nettoyage de la colonne "Voir" si elle traîne
     if "Voir" in df_base.columns:
-        df_base = df_base.drop(columns=["Voir"])
-        st.session_state.df = df_base
+        df_base.drop(columns=["Voir"], inplace=True)
 
-        # 2. Copie pour affichage
+    # 2. Création du DF d'affichage
     df_display = df_base.copy()
 
-    # 3. Insertion colonne Voir
-    if "Voir" not in df_display.columns:
-        df_display.insert(0, "Voir", False)
-
-    # Maintien de la coche "Voir" active
+    # 3. Ajout colonne Voir
+    df_display.insert(0, "Voir", False)
     if st.session_state.current_url:
         mask = df_display['url'] == st.session_state.current_url
         df_display.loc[mask, 'Voir'] = True
@@ -117,93 +112,82 @@ if df_base is not None:
     # --- ZONE DE FILTRES ---
     with st.expander("🔍 Filtres & Affichage", expanded=True):
 
-        # Ligne 1 : Les modes de vue (Workflow)
+        # Filtre de statut (Workflow)
         view_mode = st.radio(
             "Mode d'affichage :",
             ["📥 À traiter (Actifs)", "⛔ Ignorés / Suspendus", "📂 Tout voir"],
             horizontal=True
         )
 
-        st.divider()  # Ligne de séparation visuelle
+        st.divider()
 
-        # Ligne 2 : Les filtres de contenu
         col_f1, col_f2, col_f3 = st.columns(3)
-
         with col_f1:
-            # Extraction intelligente des systèmes (Sépare les virgules)
             unique_systems = get_unique_tags(df_base, 'system')
             selected_systems = st.multiselect("Filtrer par Système", unique_systems)
-
         with col_f2:
-            # Extraction intelligente des sections
             unique_sections = get_unique_tags(df_base, 'section')
             selected_sections = st.multiselect("Filtrer par Section", unique_sections)
-
         with col_f3:
-            search_query = st.text_input("Recherche texte (Titre)", "", placeholder="Ex: fracture...")
+            search_query = st.text_input("Recherche texte", "", placeholder="Titre...")
 
     # --- LOGIQUE DE FILTRAGE ---
 
-    # 1. FILTRE PAR STATUT (Ignoré ou pas)
+    # 1. FILTRE IGNORED (Correction du bug ici)
+    # On s'assure que la colonne est bien booléenne avant de filtrer
+    df_display['ignored'] = df_display['ignored'].fillna(False).astype(bool)
+
     if view_mode == "📥 À traiter (Actifs)":
-        # On montre ce qui n'est PAS ignoré
-        filtered_df = df_display[df_display['ignored'] == False]
+        # Montre ce qui est FALSE (non ignoré)
+        filtered_df = df_display[~df_display['ignored']]
     elif view_mode == "⛔ Ignorés / Suspendus":
-        # On montre SEULEMENT ce qui est ignoré
-        filtered_df = df_display[df_display['ignored'] == True]
+        # Montre ce qui est TRUE
+        filtered_df = df_display[df_display['ignored']]
     else:
-        # Tout voir
         filtered_df = df_display
 
-    # 2. FILTRE PAR SYSTÈME (Logique "Contient")
+    # 2. SYSTÈME
     if selected_systems:
-        # On construit une regex : "Neuro|Trauma" qui veut dire Neuro OU Trauma
-        # re.escape évite les bugs avec des caractères spéciaux
         pattern = '|'.join([re.escape(s) for s in selected_systems])
         filtered_df = filtered_df[
             filtered_df['system'].astype(str).str.contains(pattern, case=False, regex=True)
         ]
 
-    # 3. FILTRE PAR SECTION (Logique "Contient")
+    # 3. SECTION
     if selected_sections:
         pattern_sec = '|'.join([re.escape(s) for s in selected_sections])
         filtered_df = filtered_df[
             filtered_df['section'].astype(str).str.contains(pattern_sec, case=False, regex=True)
         ]
 
-    # 4. FILTRE RECHERCHE TEXTE
+    # 4. TEXTE
     if search_query:
         filtered_df = filtered_df[
             filtered_df['title'].str.contains(search_query, case=False, na=False)
         ]
 
-    # Limite si aucun filtre actif pour garder la fluidité
-    # (Seulement si on est en mode "Tout" ou "Actifs" sans recherche précise)
-    if not selected_systems and not selected_sections and not search_query and len(filtered_df) > 100:
-        filtered_df = filtered_df.head(100)
-        warning_msg = "⚠️ Affichage limité aux 100 premiers résultats. Utilise les filtres pour affiner."
-    else:
-        warning_msg = None
+    # Limite pour performance (optionnel)
+    if not selected_systems and not selected_sections and not search_query and len(filtered_df) > 200:
+        filtered_df = filtered_df.head(200)
 
     # --- LAYOUT PRINCIPAL ---
-    col1, col2 = st.columns([1.5, 1])
+    col1, col2 = st.columns([1.6, 1])
 
     with col1:
         st.subheader(f"Articles ({len(filtered_df)})")
-        if warning_msg:
-            st.caption(warning_msg)
-        else:
-            st.caption("Auto-save activé ⚡")
 
-        # --- TABLEAU INTERACTIF ---
+        # --- CONFIGURATION DES COLONNES (Ajout de Section ici) ---
         column_cfg = {
-            "rid": None, "content": None, "remote_last_mod_date": None, "section": None,
+            "rid": None, "content": None, "remote_last_mod_date": None,
             "url": None,
             "Voir": st.column_config.CheckboxColumn("👁️", width="small"),
             "title": st.column_config.TextColumn("Titre", disabled=True),
+
+            # Ajout des deux colonnes informatives
             "system": st.column_config.TextColumn("Système", width="small", disabled=True),
-            "ignored": st.column_config.CheckboxColumn("⛔", width="small",
-                                                       help="Cocher pour masquer de la liste principale"),
+            "section": st.column_config.TextColumn("Section", width="small", disabled=True),
+
+            "ignored": st.column_config.CheckboxColumn("⛔", width="small", help="Ignorer/Suspendre"),
             "read_status": st.column_config.CheckboxColumn("Lu ?", width="small"),
             "flashcards_made": st.column_config.CheckboxColumn("Flash ?", width="small"),
             "notes": st.column_config.TextColumn("Notes", width="medium"),
@@ -240,25 +224,35 @@ if df_base is not None:
                     try:
                         st.toast("⏳ Sauvegarde...", icon="☁️")
 
+                        # Retrouver la ligne réelle
                         original_idx = filtered_df.index[index_in_view]
                         real_rid = df_base.iloc[original_idx]['rid']
 
+                        # 1. MISE À JOUR GOOGLE SHEET (Cloud)
                         cell = worksheet.find(str(real_rid))
                         row_number = cell.row
                         headers = worksheet.row_values(1)
 
                         for col_name, new_value in data_changes.items():
                             val_to_write = "Oui" if new_value is True else ("" if new_value is False else new_value)
-
                             if col_name in headers:
                                 col_index = headers.index(col_name) + 1
                                 worksheet.update_cell(row_number, col_index, val_to_write)
 
+                                # 2. MISE À JOUR MÉMOIRE LOCALE (Crucial pour la réactivité)
+                                # On met à jour st.session_state.df directement !
+                                # Cela permet au filtre de fonctionner immédiatement au prochain rerun
+                                st.session_state.df.at[original_idx, col_name] = new_value
+
+                        # Update date
                         col_access = headers.index('last_access') + 1
-                        worksheet.update_cell(row_number, col_access, str(datetime.now()))
+                        current_time = str(datetime.now())
+                        worksheet.update_cell(row_number, col_access, current_time)
 
                         st.toast("✅ Sauvegardé !", icon="💾")
-                        del st.session_state.df
+
+                        # PLUS BESOIN de vider le cache brutalement (del st.session_state.df)
+                        # car on a mis à jour la mémoire locale manuellement ci-dessus.
                         need_rerun = True
 
                     except Exception as e:
