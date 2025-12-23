@@ -76,8 +76,19 @@ if df_base is not None:
         lambda x: True if str(x).lower() in ['oui', 'true', '1'] else False)
 
     # --- PRÉPARATION AFFICHAGE ---
+
+    # 1. NETTOYAGE PRÉVENTIF (Le correctif est ici)
+    # Si par malheur df_base contient déjà "Voir" à cause d'une ancienne session, on l'enlève.
+    if "Voir" in df_base.columns:
+        df_base = df_base.drop(columns=["Voir"])
+        st.session_state.df = df_base  # On met à jour la mémoire propre
+
+    # 2. CRÉATION DE LA COPIE D'AFFICHAGE
     df_display = df_base.copy()
-    df_display.insert(0, "Voir", False)
+
+    # 3. INSERTION SÉCURISÉE
+    if "Voir" not in df_display.columns:
+        df_display.insert(0, "Voir", False)
 
     # Maintien de la coche "Voir" active
     if st.session_state.current_url:
@@ -100,7 +111,6 @@ if df_base is not None:
         else:
             filtered_df = df_display.head(50)
 
-        # Indicateur discret
         st.caption("⚡ Sauvegarde automatique activée.")
 
         # --- TABLEAU INTERACTIF ---
@@ -128,29 +138,25 @@ if df_base is not None:
         if changes:
             need_rerun = False
 
-            # On parcourt tous les changements
             for index_in_view, change_dict in changes.items():
 
-                # A. CLIC SUR L'OEIL (VOIR)
+                # A. CLIC SUR L'OEIL
                 if "Voir" in change_dict and change_dict["Voir"] == True:
                     original_idx = filtered_df.index[index_in_view]
                     selected_url = df_base.iloc[original_idx]['url']
                     st.session_state.current_url = selected_url
                     need_rerun = True
 
-                # B. MODIFICATION DE DONNÉES (Sauvegarde Google Sheet)
-                # On regarde s'il y a autre chose que "Voir" dans les changements
+                # B. MODIFICATION DE DONNÉES
                 data_changes = {k: v for k, v in change_dict.items() if k != "Voir"}
 
                 if data_changes:
                     try:
-                        # Petite notification
                         st.toast("⏳ Sauvegarde en cours...", icon="☁️")
 
                         original_idx = filtered_df.index[index_in_view]
                         real_rid = df_base.iloc[original_idx]['rid']
 
-                        # Connexion Sheet
                         cell = worksheet.find(str(real_rid))
                         row_number = cell.row
                         headers = worksheet.row_values(1)
@@ -160,14 +166,11 @@ if df_base is not None:
                             col_index = headers.index(col_name) + 1
                             worksheet.update_cell(row_number, col_index, val_to_write)
 
-                        # Update date
                         col_access = headers.index('last_access') + 1
                         worksheet.update_cell(row_number, col_access, str(datetime.now()))
 
-                        # Confirmation
                         st.toast("✅ Sauvegardé !", icon="💾")
 
-                        # IMPORTANT : On vide le cache pour recharger les données fraîches depuis Google
                         del st.session_state.df
                         need_rerun = True
 
